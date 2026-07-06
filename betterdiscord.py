@@ -18,17 +18,60 @@ from typing import Optional
 LOG = logging.getLogger("betterdiscord")
 
 HOME = Path.home()
-DISCORD_DATA = HOME / "Library/Application Support/discord"
-DISCORD_APP = Path("/Applications/Discord.app")
-BD_ASAR = HOME / "Library/Application Support/BetterDiscord/data/betterdiscord.asar"
 BD_ASAR_URL = "https://github.com/rauenzi/BetterDiscordApp/releases/latest/download/betterdiscord.asar"
-CONFIG_PATH = HOME / ".config/betterdiscord-patcher/config.json"
 APP_NAME = "BetterDiscordPatcher"
-INSTALL_DIR = HOME / f"Library/Application Support/{APP_NAME}"
-BIN_PATH = HOME / ".local/bin/betterdiscord"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
-BRANCH = "main"
+BRANCH = "windows"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
+SUPPORTED_SYSTEMS = {"Darwin", "Windows"}
+
+
+def env_path(name: str, fallback: Path) -> Path:
+    value = os.environ.get(name)
+    return Path(value) if value else fallback
+
+
+def default_discord_data() -> Path:
+    system = platform.system()
+    if system == "Windows":
+        return env_path("LOCALAPPDATA", HOME / "AppData/Local") / "Discord"
+    return HOME / "Library/Application Support/discord"
+
+
+def default_bd_asar() -> Path:
+    system = platform.system()
+    if system == "Windows":
+        return env_path("APPDATA", HOME / "AppData/Roaming") / "BetterDiscord/data/betterdiscord.asar"
+    return HOME / "Library/Application Support/BetterDiscord/data/betterdiscord.asar"
+
+
+def default_config_path() -> Path:
+    system = platform.system()
+    if system == "Windows":
+        return env_path("APPDATA", HOME / "AppData/Roaming") / f"{APP_NAME}/config.json"
+    return HOME / ".config/betterdiscord-patcher/config.json"
+
+
+def default_install_dir() -> Path:
+    system = platform.system()
+    if system == "Windows":
+        return env_path("LOCALAPPDATA", HOME / "AppData/Local") / APP_NAME
+    return HOME / f"Library/Application Support/{APP_NAME}"
+
+
+def default_bin_path() -> Path:
+    system = platform.system()
+    if system == "Windows":
+        return default_install_dir() / "betterdiscord.cmd"
+    return HOME / ".local/bin/betterdiscord"
+
+
+DISCORD_DATA = default_discord_data()
+DISCORD_APP = Path("/Applications/Discord.app")
+BD_ASAR = default_bd_asar()
+CONFIG_PATH = default_config_path()
+INSTALL_DIR = default_install_dir()
+BIN_PATH = default_bin_path()
 CONFIG_TEMPLATE = {
     "notify": False,
     "keep_open": False,
@@ -80,8 +123,8 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
     )
 
-    if platform.system() != "Darwin":
-        LOG.error("This installer currently supports macOS only.")
+    if platform.system() not in SUPPORTED_SYSTEMS:
+        LOG.error("This installer currently supports macOS and Windows only.")
         return 1
 
     if args.init_config:
@@ -140,7 +183,7 @@ def parse_args() -> argparse.Namespace:
     pre_args, _ = pre_parser.parse_known_args()
 
     defaults = merged_defaults(pre_args.config.expanduser())
-    parser = argparse.ArgumentParser(description="Small macOS BetterDiscord installer script.")
+    parser = argparse.ArgumentParser(description="Small BetterDiscord patcher script.")
     parser.set_defaults(**defaults)
 
     parser.add_argument("--config", type=Path, default=pre_args.config, help="config file path")
@@ -257,6 +300,9 @@ def edit_config(path: Path) -> None:
     if editor:
         subprocess.run([editor, str(path)], check=True)
         return
+    if platform.system() == "Windows":
+        os.startfile(path)  # type: ignore[attr-defined]
+        return
     subprocess.run(["open", "-t", str(path)], check=True)
 
 
@@ -278,7 +324,7 @@ def options_dict(args: argparse.Namespace) -> dict:
 def update_script(install_dir: Path, raw_base: str) -> None:
     LOG.info("Updating installer script from %s", raw_base)
     install_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("betterdiscord.py", "README.md", "install.sh"):
+    for filename in ("betterdiscord.py", "README.md", "install.sh", "install.ps1"):
         download_file(f"{raw_base.rstrip('/')}/{filename}", install_dir / filename)
     (install_dir / "betterdiscord").write_text(
         '#!/bin/zsh\nDIR="${0:A:h}"\npython3 "$DIR/betterdiscord.py" "$@"\n',
@@ -286,6 +332,11 @@ def update_script(install_dir: Path, raw_base: str) -> None:
     )
     (install_dir / "betterdiscord").chmod(0o755)
     (install_dir / "install.sh").chmod(0o755)
+    if platform.system() == "Windows":
+        (install_dir / "betterdiscord.cmd").write_text(
+            f'@echo off\r\npython "{install_dir / "betterdiscord.py"}" %*\r\n',
+            encoding="utf-8",
+        )
     subprocess.run([sys.executable, "-m", "py_compile", str(install_dir / "betterdiscord.py")], check=True)
     LOG.info("Updated installer script: %s", install_dir)
 
@@ -482,6 +533,8 @@ def download_asar(path: Path, force: bool, dry_run: bool) -> bool:
 
 
 def discord_update_dir() -> Optional[Path]:
+    if platform.system() == "Windows":
+        return None
     state = HOME / "Library/Caches/com.hnc.Discord.ShipIt/ShipItState.plist"
     try:
         with state.open("rb") as file:
@@ -504,16 +557,29 @@ def wait_for_update(update_dir: Optional[Path], timeout: float = 180.0) -> bool:
 
 
 def discord_running() -> bool:
+    if platform.system() == "Windows":
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Discord.exe"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return "Discord.exe" in result.stdout
     return subprocess.run(["pgrep", "-x", "Discord"], capture_output=True).returncode == 0
 
 
 def shipit_running() -> bool:
+    if platform.system() == "Windows":
+        return False
     result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
     return any("ShipIt" in line and "Discord" in line for line in result.stdout.splitlines())
 
 
 def quit_discord() -> None:
     LOG.info("Quitting Discord")
+    if platform.system() == "Windows":
+        subprocess.run(["taskkill", "/IM", "Discord.exe", "/T"], check=False, capture_output=True)
+        return
     subprocess.run(["osascript", "-e", 'quit app "Discord"'], check=False)
     deadline = time.time() + 10
     while time.time() < deadline and discord_running():
@@ -522,10 +588,15 @@ def quit_discord() -> None:
 
 def open_discord() -> None:
     LOG.info("Reopening Discord")
+    if platform.system() == "Windows":
+        subprocess.run(["cmd", "/c", "start", "", "discord://-/"], check=False)
+        return
     subprocess.run(["open", "-a", "Discord"], check=False)
 
 
 def log_discord_app_version() -> None:
+    if platform.system() == "Windows":
+        return
     try:
         with (DISCORD_APP / "Contents/Info.plist").open("rb") as file:
             LOG.info("Discord app version: %s", plistlib.load(file).get("CFBundleShortVersionString", "unknown"))
@@ -535,6 +606,8 @@ def log_discord_app_version() -> None:
 
 def notify(title: str, message: str, enabled: bool) -> None:
     if not enabled:
+        return
+    if platform.system() == "Windows":
         return
     script = f'display notification "{escape_osa(message)}" with title "{escape_osa(title)}"'
     subprocess.run(["osascript", "-e", script], check=False)

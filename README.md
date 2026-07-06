@@ -1,11 +1,22 @@
 # BetterDiscordPatcher
 
-Small macOS script that patches Discord to load BetterDiscord.
+Small script that patches Discord to load BetterDiscord.
+
+This branch contains early Windows support groundwork. macOS remains the stable
+path until Windows install and patch flows are tested on a Windows machine.
 
 ## Install
 
+macOS:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordPatcher/main/install.sh | sh
+```
+
+Windows branch preview:
+
+```powershell
+irm https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordPatcher/windows/install.ps1 | iex
 ```
 
 The installer creates a config file and asks whether to open it. If the command
@@ -34,6 +45,7 @@ Config lives at:
 
 ```text
 ~/.config/betterdiscord-patcher/config.json
+%APPDATA%\BetterDiscordPatcher\config.json
 ```
 
 Command-line options override config values.
