@@ -1,14 +1,14 @@
 # BetterDiscordCLIInstaller
 
-Small macOS BetterDiscord installer script.
+Small macOS command-line installer for BetterDiscord.
 
-One-line install:
+## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordCLIInstaller/main/install.sh | sh
 ```
 
-By default this installs files to:
+Installs to:
 
 ```text
 ~/Library/Application Support/BetterDiscordCLIInstaller
@@ -16,66 +16,53 @@ By default this installs files to:
 ~/.config/betterdiscord-cli-installer/config.json
 ```
 
-During install, the config file is created if missing. The installer will ask
-whether to open it for editing. You can force that behavior with:
+The install script creates the config file if needed and asks whether to open it.
+To open config automatically during install:
 
 ```sh
 BDI_EDIT_CONFIG=1 curl -fsSL https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordCLIInstaller/main/install.sh | sh
 ```
 
-Run:
+If `betterdiscord` is not found after install, add this to your shell profile:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Use
 
 ```sh
 betterdiscord
 ```
 
-Useful options:
+Common commands:
 
 ```sh
---init-config      Create the user config file
---edit-config      Open the user config file for editing
---show-config      Print the effective settings
---update           Update the installer script from GitHub
---uninstall        Remove the installer script
---remove-config    Also remove config with --uninstall
---unpatch          Remove BetterDiscord from Discord
+betterdiscord --edit-config
+betterdiscord --show-config
+betterdiscord --dry-run
+betterdiscord --update
+betterdiscord --unpatch
+betterdiscord --uninstall
+```
+
+Useful options:
+
+```text
 --no-notify         Disable macOS notifications
 --keep-open         Patch without quitting Discord first
 --no-reopen         Quit Discord for patching but do not reopen it
 --no-download       Skip downloading betterdiscord.asar
 --force-download    Ignore the cached ETag and download again
---dry-run           Show what would change without writing files
 --verbose           Show debug logs
 ```
 
-Persistent config:
+## Config
 
-```sh
-betterdiscord --init-config
-betterdiscord --edit-config
-```
-
-This creates:
+Persistent settings live at:
 
 ```text
 ~/.config/betterdiscord-cli-installer/config.json
-```
-
-Edit that file to set normal behavior:
-
-```json
-{
-  "download": true,
-  "dry_run": false,
-  "force_download": false,
-  "keep_open": false,
-  "notify": false,
-  "reopen": true,
-  "verbose": false,
-  "wait_update": true,
-  "discord_data": "~/Library/Application Support/discord",
-  "bd_asar": "~/Library/Application Support/BetterDiscord/data/betterdiscord.asar"
-}
 ```
 
 Settings are applied in this order:
@@ -84,40 +71,35 @@ Settings are applied in this order:
 defaults < config file < command-line options
 ```
 
-Use `--config` to load a different config file:
+Use a different config file:
 
 ```sh
 betterdiscord --config ~/path/to/config.json --show-config
 ```
 
-The same path can also be supplied with `BD_CONFIG` for scripts that need it.
+## Remove
 
-Update the installer script:
-
-```sh
-betterdiscord --update
-```
-
-Remove the installer script:
-
-```sh
-betterdiscord --uninstall
-```
-
-This asks whether to remove the config if one exists.
-
-Remove the installer script and its config:
-
-```sh
-betterdiscord --uninstall --remove-config
-```
-
-Remove BetterDiscord from Discord without removing this installer:
+Remove BetterDiscord from Discord:
 
 ```sh
 betterdiscord --unpatch
 ```
 
-The installer finds Discord's current `discord_desktop_core` by locating
-`core.asar`, then writes `index.js` beside it using BetterDiscord's injection
-script.
+Remove this installer:
+
+```sh
+betterdiscord --uninstall
+```
+
+`--uninstall` asks whether to remove config if one exists. To remove the config
+without prompting:
+
+```sh
+betterdiscord --uninstall --remove-config
+```
+
+## How It Works
+
+The script finds Discord's current `discord_desktop_core` by locating
+`core.asar`, writes `index.js` beside it, and downloads
+`betterdiscord.asar` with ETag caching.
