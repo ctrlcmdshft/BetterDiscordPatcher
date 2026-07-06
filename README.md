@@ -1,8 +1,11 @@
 # BetterDiscordPatcher
 
-Small macOS script that patches Discord to load BetterDiscord.
+![macOS](https://img.shields.io/badge/macOS-supported-0A84FF)
+![Python](https://img.shields.io/badge/python-3.x-34C759)
+![Shell](https://img.shields.io/badge/install-curl%20%7C%20sh-FF9F0A)
 
-Supports Stable, PTB, Canary, and Development app detection.
+Small macOS patcher that installs the BetterDiscord loader into Discord's
+desktop core.
 
 ## Install
 
@@ -10,37 +13,39 @@ Supports Stable, PTB, Canary, and Development app detection.
 curl -fsSL https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordPatcher/main/install.sh | sh
 ```
 
-The installer creates a config file and asks whether to open it. If the command
-is not found after install, add `~/.local/bin` to your `PATH`.
+The installer creates a config file, installs the `betterdiscord` command, and
+offers to open the config. Add `~/.local/bin` to `PATH` if the command is not
+found after install.
 
-## Use
+## Commands
 
 ```sh
 betterdiscord
-```
-
-Other useful commands:
-
-```sh
+betterdiscord --dry-run
 betterdiscord --edit-config
 betterdiscord --format-config
-betterdiscord --dry-run
 betterdiscord --release canary
-betterdiscord --update
-betterdiscord --unpatch
 betterdiscord --cleanup-old --dry-run
-betterdiscord --no-cleanup-before-install
+betterdiscord --unpatch
+betterdiscord --update
 betterdiscord --uninstall
-betterdiscord --help
 ```
 
-Remove old Discord `app-*` folders after previewing. Cleanup keeps the newest
-`app-*` folder and protects the version matching the installed Discord app.
+## Releases
+
+Default release is `stable`.
 
 ```sh
-betterdiscord --cleanup-old --dry-run
-betterdiscord --cleanup-old
+betterdiscord --release stable
+betterdiscord --release auto
+betterdiscord --release ptb
+betterdiscord --release canary
+betterdiscord --release development
+betterdiscord --release all
 ```
+
+`auto` detects installed Discord apps in `/Applications`. Explicit release flags
+target that release's app name, data folder, updater state, and reopen behavior.
 
 ## Config
 
@@ -50,25 +55,58 @@ Config lives at:
 ~/.config/betterdiscord-patcher/config.json
 ```
 
-Command-line options override config values.
+Command-line options override config values. Reformat an existing config with:
 
-Config keys:
+```sh
+betterdiscord --format-config
+```
+
+Generated config:
+
+```json
+{
+  "release": "stable",
+  "discord_data": "~/Library/Application Support/discord",
+  "bd_asar": "~/Library/Application Support/BetterDiscord/data/betterdiscord.asar",
+  "download": true,
+  "wait_update": true,
+  "cleanup_before_install": true,
+  "keep_versions": 1,
+  "keep_open": false,
+  "reopen": true,
+  "notify": false
+}
+```
 
 | Key | Meaning |
 | --- | --- |
 | `release` | Discord release to patch: `stable`, `auto`, `all`, `ptb`, `canary`, or `development`. |
-| `notify` | Show macOS notifications. |
-| `keep_open` | Patch without quitting Discord first. |
-| `reopen` | Reopen Discord after patching. |
+| `discord_data` | Discord data folder to patch. |
+| `bd_asar` | Destination for `betterdiscord.asar`. |
 | `download` | Download or refresh `betterdiscord.asar`. |
 | `wait_update` | Wait for Discord's updater to finish before patching. |
 | `cleanup_before_install` | Remove old Discord `app-*` folders before patching. |
 | `keep_versions` | Number of Discord `app-*` versions to keep when cleaning. |
-| `discord_data` | Discord data folder to patch. |
-| `bd_asar` | Destination for `betterdiscord.asar`. |
+| `keep_open` | Patch without quitting Discord first. |
+| `reopen` | Reopen Discord only if it was running before patching. |
+| `notify` | Show macOS notifications. |
 
-## Notes
+## Cleanup
 
-The script can remove old Discord `app-*` folders, finds Discord's current
-`discord_desktop_core` folders, writes the BetterDiscord loader to `index.js`,
-and downloads `betterdiscord.asar` with ETag caching.
+Cleanup only removes old `app-*` folders. It keeps the newest `app-*` folder and
+protects the version matching the installed Discord app.
+
+```sh
+betterdiscord --cleanup-old --dry-run
+betterdiscord --cleanup-old
+```
+
+## Uninstall
+
+```sh
+betterdiscord --unpatch
+betterdiscord --uninstall
+```
+
+`--unpatch` removes the BetterDiscord loader from Discord. `--uninstall` removes
+the script command and asks before removing config.
