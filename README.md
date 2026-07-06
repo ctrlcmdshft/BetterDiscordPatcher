@@ -23,6 +23,7 @@ Other useful commands:
 
 ```sh
 betterdiscord --edit-config
+betterdiscord --format-config
 betterdiscord --dry-run
 betterdiscord --release canary
 betterdiscord --update

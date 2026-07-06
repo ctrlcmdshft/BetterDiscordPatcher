@@ -138,6 +138,10 @@ def main() -> int:
         write_config(args.config, overwrite=args.force)
         return 0
 
+    if args.format_config:
+        format_config(args.config)
+        return 0
+
     if args.edit_config:
         edit_config(args.config)
         return 0
@@ -211,6 +215,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--config", type=Path, default=pre_args.config, help="config file path")
     parser.add_argument("--init-config", action="store_true", help="create a config file with current defaults")
+    parser.add_argument("--format-config", action="store_true", help="rewrite the config file in the standard order")
     parser.add_argument("--edit-config", action="store_true", help="open the config file for editing")
     parser.add_argument("--show-config", action="store_true", help="print effective settings and exit")
     parser.add_argument("--update", action="store_true", help="update this installer script from GitHub")
@@ -346,10 +351,21 @@ def write_config(path: Path, overwrite: bool) -> None:
     LOG.info("Wrote config: %s", path)
 
 
+def format_config(path: Path) -> None:
+    path = path.expanduser()
+    defaults = merged_defaults(path)
+    data = options_dict(argparse.Namespace(**defaults))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    LOG.info("Formatted config: %s", path)
+
+
 def edit_config(path: Path) -> None:
     path = path.expanduser()
     if not path.exists():
         write_config(path, overwrite=False)
+    else:
+        format_config(path)
 
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
     if editor:
