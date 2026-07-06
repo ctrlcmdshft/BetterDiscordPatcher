@@ -104,6 +104,8 @@ Remove the installer script:
 betterdiscord --uninstall
 ```
 
+This asks whether to remove the config if one exists.
+
 Remove the installer script and its config:
 
 ```sh

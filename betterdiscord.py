@@ -308,6 +308,8 @@ def uninstall_script(
 ) -> None:
     remove_path(bin_path, dry_run)
     remove_path(install_dir, dry_run)
+    if not remove_config and config_path.exists():
+        remove_config = confirm("Remove config too?", default=False)
     if remove_config:
         remove_path(config_path, dry_run)
         config_parent = config_path.parent
@@ -315,6 +317,16 @@ def uninstall_script(
             config_parent.rmdir()
     else:
         LOG.info("Keeping config: %s", config_path)
+
+
+def confirm(prompt: str, default: bool = False) -> bool:
+    if not sys.stdin.isatty():
+        return default
+    suffix = "[Y/n]" if default else "[y/N]"
+    answer = input(f"{prompt} {suffix} ").strip().lower()
+    if not answer:
+        return default
+    return answer in {"y", "yes"}
 
 
 def remove_path(path: Path, dry_run: bool) -> None:
