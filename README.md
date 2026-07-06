@@ -1,14 +1,13 @@
 # BetterDiscordPatcher
 
 ![macOS](https://img.shields.io/badge/macOS-supported-0A84FF)
-![Windows](https://img.shields.io/badge/Windows-preview-FF9F0A)
+![Windows](https://img.shields.io/badge/Windows-supported-FF9F0A)
 ![Python](https://img.shields.io/badge/python-3.x-34C759)
 
 Small patcher that installs the BetterDiscord loader into Discord's desktop
 core.
 
-This branch contains Windows support groundwork. macOS is the stable path;
-Windows install and patch flows still need testing on a Windows machine.
+Small cross-platform patcher for BetterDiscord on macOS and Windows.
 
 ## Install
 
@@ -18,10 +17,10 @@ macOS:
 curl -fsSL https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordPatcher/main/install.sh | sh
 ```
 
-Windows preview:
+Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordPatcher/windows/install.ps1 | iex
+irm https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordPatcher/main/install.ps1 | iex
 ```
 
 The Windows installer places the script under `%LOCALAPPDATA%\BetterDiscordPatcher`,
