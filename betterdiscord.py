@@ -22,7 +22,7 @@ LOG = logging.getLogger("betterdiscord")
 HOME = Path.home()
 BD_ASAR_URL = "https://github.com/rauenzi/BetterDiscordApp/releases/latest/download/betterdiscord.asar"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.1.1"
+SCRIPT_VERSION = "2.1.2"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -201,7 +201,8 @@ def main() -> int:
         return 1
 
     if should_check_for_script_update(args):
-        announce_script_update(args.raw_base)
+        if maybe_handle_script_update(args.raw_base, args.update_dir.expanduser()):
+            return 0
 
     if args.check_update:
         return 0 if report_script_update_status(args.raw_base) else 1
@@ -381,16 +382,20 @@ def should_check_for_script_update(args: argparse.Namespace) -> bool:
     return True
 
 
-def announce_script_update(raw_base: str) -> None:
+def maybe_handle_script_update(raw_base: str, install_dir: Path) -> bool:
     latest_version = latest_script_version(raw_base)
     if not latest_version:
-        return
+        return False
     if version_tuple(latest_version) > version_tuple(SCRIPT_VERSION):
         LOG.info(
             "Update available: %s (installed: %s). Run `betterdiscord --update`.",
             latest_version,
             SCRIPT_VERSION,
         )
+        if sys.stdin.isatty() and confirm("Update now?", default=True):
+            update_script(install_dir, raw_base)
+            return True
+    return False
 
 
 def report_script_update_status(raw_base: str) -> bool:
