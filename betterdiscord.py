@@ -874,26 +874,29 @@ def install(options: Options) -> None:
     LOG.info("Discord data: %s", options.discord_data)
     LOG.info("BetterDiscord asar: %s", options.bd_asar)
     notify("BetterDiscord", "Preparing installation", options.notify)
-
-    if options.download:
-        download_asar(options.bd_asar, force=options.force_download, dry_run=options.dry_run)
+    was_running = discord_running(options.discord_data)
+    if was_running and options.restart and not options.dry_run:
+        quit_discord(options.discord_data)
 
     version_dirs = None
     if options.cleanup_before_install:
-        version_dirs = cleanup_old_versions(
-            options.discord_data,
-            keep=options.keep_versions,
-            dry_run=options.dry_run,
-        )
+        try:
+            version_dirs = cleanup_old_versions(
+                options.discord_data,
+                keep=options.keep_versions,
+                dry_run=options.dry_run,
+            )
+        except PermissionError as error:
+            if platform.system() == "Windows":
+                LOG.warning("Skipping old-version cleanup: %s", error)
+                version_dirs = discord_version_dirs(options.discord_data)
+            else:
+                raise
 
     version_dir = latest_version_dir(options.discord_data, version_dirs=version_dirs)
     core_dirs = discord_core_dirs(options.discord_data, version_dirs=version_dirs)
     LOG.info("Latest Discord version: %s", version_dir.name)
     LOG.info("Discord cores found: %d", len(core_dirs))
-
-    was_running = discord_running(options.discord_data)
-    if was_running and options.restart and not options.dry_run:
-        quit_discord(options.discord_data)
 
     try:
         if options.download:
