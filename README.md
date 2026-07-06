@@ -31,6 +31,7 @@ creates `betterdiscord.cmd`, and adds that directory to the user `PATH`.
 ```sh
 betterdiscord
 betterdiscord --version
+betterdiscord --check-update
 betterdiscord --ptb
 betterdiscord --canary
 betterdiscord --all
@@ -97,6 +98,13 @@ Check the installed script version with:
 betterdiscord --version
 ```
 
+Check for a newer script version with:
+
+```sh
+betterdiscord --check-update
+```
+
+The script also warns during normal runs when a newer version is available.
 Use `betterdiscord --update` to refresh the installed script from GitHub.
 
 | Key | Meaning |

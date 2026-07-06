@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -21,9 +22,9 @@ LOG = logging.getLogger("betterdiscord")
 HOME = Path.home()
 BD_ASAR_URL = "https://github.com/rauenzi/BetterDiscordApp/releases/latest/download/betterdiscord.asar"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.1.0"
+SCRIPT_VERSION = "2.1.1"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
-BRANCH = "windows"
+BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 SUPPORTED_SYSTEMS = {"Darwin", "Windows"}
 WINDOWS_RELEASE_DIRS = {
@@ -199,6 +200,12 @@ def main() -> int:
         LOG.error("This installer currently supports macOS and Windows only.")
         return 1
 
+    if should_check_for_script_update(args):
+        announce_script_update(args.raw_base)
+
+    if args.check_update:
+        return 0 if report_script_update_status(args.raw_base) else 1
+
     if args.init_config:
         write_config(args.config, overwrite=args.force)
         return 0
@@ -289,6 +296,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--format-config", action="store_true", help="rewrite the config file in the standard order")
     parser.add_argument("--edit-config", action="store_true", help="open the config file for editing")
     parser.add_argument("--show-config", action="store_true", help="print config values and exit")
+    parser.add_argument("--check-update", action="store_true", help="check whether a newer script version is available")
     parser.add_argument("--update", action="store_true", help="update this installer script from GitHub")
     parser.add_argument("--uninstall", action="store_true", help="remove the installer script")
     parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
@@ -365,6 +373,66 @@ def parse_args() -> argparse.Namespace:
         for arg in sys.argv[1:]
     )
     return args
+
+
+def should_check_for_script_update(args: argparse.Namespace) -> bool:
+    if args.update or args.init_config or args.format_config or args.edit_config or args.check_update:
+        return False
+    return True
+
+
+def announce_script_update(raw_base: str) -> None:
+    latest_version = latest_script_version(raw_base)
+    if not latest_version:
+        return
+    if version_tuple(latest_version) > version_tuple(SCRIPT_VERSION):
+        LOG.info(
+            "Update available: %s (installed: %s). Run `betterdiscord --update`.",
+            latest_version,
+            SCRIPT_VERSION,
+        )
+
+
+def report_script_update_status(raw_base: str) -> bool:
+    latest_version = latest_script_version(raw_base)
+    if not latest_version:
+        LOG.error("Could not determine the latest script version.")
+        return False
+    if version_tuple(latest_version) > version_tuple(SCRIPT_VERSION):
+        LOG.info("Update available: %s (installed: %s)", latest_version, SCRIPT_VERSION)
+        return True
+    LOG.info("You are up to date: %s", SCRIPT_VERSION)
+    return True
+
+
+def latest_script_version(raw_base: str) -> Optional[str]:
+    try:
+        request = urllib.request.Request(
+            f"{raw_base.rstrip('/')}/betterdiscord.py",
+            headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            content = response.read().decode("utf-8", errors="ignore")
+    except Exception as error:
+        LOG.debug("Could not check for script updates: %s", error)
+        return None
+
+    match = re.search(r'^SCRIPT_VERSION = "([^"]+)"$', content, re.MULTILINE)
+    if not match:
+        LOG.debug("Could not find SCRIPT_VERSION in remote script.")
+        return None
+    return match.group(1)
+
+
+def version_tuple(value: str) -> tuple[int, ...]:
+    parts = []
+    for piece in value.split("."):
+        try:
+            parts.append(int(piece))
+        except ValueError:
+            numbers = re.match(r"(\d+)", piece)
+            parts.append(int(numbers.group(1)) if numbers else 0)
+    return tuple(parts)
 
 
 def resolve_target_discord_data(args: argparse.Namespace) -> list[Path]:

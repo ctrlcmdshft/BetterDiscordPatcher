@@ -6,7 +6,7 @@ $BinDir = if ($env:BDI_BIN_DIR) { $env:BDI_BIN_DIR } else { $InstallDir }
 $BinPath = if ($env:BDI_BIN_PATH) { $env:BDI_BIN_PATH } else { Join-Path $BinDir "betterdiscord.cmd" }
 $ConfigPath = if ($env:BDI_CONFIG_PATH) { $env:BDI_CONFIG_PATH } else { Join-Path $env:APPDATA "$AppName\config.json" }
 $Repo = if ($env:BDI_REPO) { $env:BDI_REPO } else { "ctrlcmdshft/BetterDiscordPatcher" }
-$Branch = if ($env:BDI_BRANCH) { $env:BDI_BRANCH } else { "windows" }
+$Branch = if ($env:BDI_BRANCH) { $env:BDI_BRANCH } else { "main" }
 $RawBase = if ($env:BDI_RAW_BASE) { $env:BDI_RAW_BASE } else { "https://raw.githubusercontent.com/$Repo/$Branch" }
 
 function Download-File($Url, $Destination) {
