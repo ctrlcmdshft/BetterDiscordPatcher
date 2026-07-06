@@ -469,7 +469,7 @@ def selected_releases(args: argparse.Namespace) -> list[DiscordRelease]:
     return detected
 
 
-def cleanup_old_versions(release: DiscordRelease, keep: int, dry_run: bool, log_release: bool = True) -> None:
+def cleanup_old_versions(release: DiscordRelease, keep: int, dry_run: bool, log_release: bool = True) -> list[Path]:
     if keep < 1:
         raise ValueError("--keep-versions must be 1 or greater")
     if log_release:
@@ -484,10 +484,11 @@ def cleanup_old_versions(release: DiscordRelease, keep: int, dry_run: bool, log_
     LOG.info("Keeping: %s", ", ".join(path.name for path in kept))
     if not removable:
         LOG.info("No old Discord app version folders to remove.")
-        return
+        return kept
 
     for version_dir in removable:
         remove_path(version_dir, dry_run)
+    return kept
 
 
 def unpatch_discord(release: DiscordRelease, restart: bool, reopen: bool, dry_run: bool) -> None:
@@ -544,11 +545,17 @@ def install_release(release: DiscordRelease, options: Options) -> None:
         notify("BetterDiscord", f"{release.name} is still updating", options.notify)
         raise RuntimeError(f"{release.name} update did not finish in time")
 
+    version_dirs = None
     if options.cleanup_before_install:
-        cleanup_old_versions(release, keep=options.keep_versions, dry_run=options.dry_run, log_release=False)
+        version_dirs = cleanup_old_versions(
+            release,
+            keep=options.keep_versions,
+            dry_run=options.dry_run,
+            log_release=False,
+        )
 
-    version_dir = latest_version_dir(release.data_path)
-    core_dirs = discord_core_dirs(release.data_path)
+    version_dir = latest_version_dir(release.data_path, version_dirs=version_dirs)
+    core_dirs = discord_core_dirs(release.data_path, version_dirs=version_dirs)
     LOG.info("Latest Discord version: %s", version_dir.name)
     LOG.info("Discord cores found: %d", len(core_dirs))
 
@@ -568,8 +575,8 @@ def install_release(release: DiscordRelease, options: Options) -> None:
             open_discord(release)
 
 
-def latest_version_dir(discord_data: Path) -> Path:
-    return discord_version_dirs(discord_data)[-1]
+def latest_version_dir(discord_data: Path, version_dirs: Optional[list[Path]] = None) -> Path:
+    return (version_dirs or discord_version_dirs(discord_data))[-1]
 
 
 def discord_version_dirs(discord_data: Path) -> list[Path]:
@@ -633,18 +640,8 @@ def find_core_dir(version_dir: Path) -> Path:
     )
 
 
-def discord_core_dirs(discord_data: Path) -> list[Path]:
-    if not discord_data.exists():
-        raise FileNotFoundError(f"Discord data folder not found: {discord_data}")
-
-    try:
-        version_dirs = sorted((p for p in discord_data.iterdir() if version_key(p)), key=version_key)
-    except PermissionError as error:
-        raise PermissionError(
-            f"Cannot read Discord data folder: {discord_data}. "
-            "Run this command from Terminal with permission to access Application Support."
-        ) from error
-
+def discord_core_dirs(discord_data: Path, version_dirs: Optional[list[Path]] = None) -> list[Path]:
+    version_dirs = version_dirs or discord_version_dirs(discord_data)
     core_dirs = []
     seen = set()
     for version_dir in version_dirs:
