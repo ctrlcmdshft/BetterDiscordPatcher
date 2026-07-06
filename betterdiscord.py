@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import plistlib
+import shutil
 import subprocess
 import sys
 import time
@@ -24,6 +25,7 @@ BD_ASAR_URL = "https://github.com/rauenzi/BetterDiscordApp/releases/latest/downl
 CONFIG_PATH = HOME / ".config/betterdiscord-cli-installer/config.json"
 APP_NAME = "BetterDiscordCLIInstaller"
 INSTALL_DIR = HOME / f"Library/Application Support/{APP_NAME}"
+BIN_PATH = HOME / ".local/bin/betterdiscord"
 REPO = "ctrlcmdshft/BetterDiscordCLIInstaller"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -98,6 +100,20 @@ def main() -> int:
         update_script(args.update_dir.expanduser(), args.raw_base)
         return 0
 
+    if args.unpatch:
+        unpatch_discord(args.discord_data.expanduser(), dry_run=args.dry_run)
+        return 0
+
+    if args.uninstall:
+        uninstall_script(
+            args.update_dir.expanduser(),
+            args.bin_path.expanduser(),
+            args.config.expanduser(),
+            remove_config=args.remove_config,
+            dry_run=args.dry_run,
+        )
+        return 0
+
     options = Options(
         discord_data=args.discord_data.expanduser(),
         bd_asar=args.bd_asar.expanduser(),
@@ -132,10 +148,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--edit-config", action="store_true", help="open the config file for editing")
     parser.add_argument("--show-config", action="store_true", help="print effective settings and exit")
     parser.add_argument("--update", action="store_true", help="update this installer script from GitHub")
+    parser.add_argument("--uninstall", action="store_true", help="remove the installer script")
+    parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
+    parser.add_argument("--unpatch", action="store_true", help="remove BetterDiscord from Discord")
     parser.add_argument(
         "--update-dir",
         type=Path,
         default=Path(os.environ.get("BDI_INSTALL_DIR", INSTALL_DIR)),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--bin-path",
+        type=Path,
+        default=Path(os.environ.get("BDI_BIN_PATH", BIN_PATH)),
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -189,8 +214,10 @@ def merged_defaults(config_path: Path) -> dict:
 def read_config(path: Path) -> dict:
     if not path.exists():
         return {}
-    with path.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        return {}
+    data = json.loads(content)
     if not isinstance(data, dict):
         raise ValueError(f"Config must be a JSON object: {path}")
 
@@ -270,6 +297,52 @@ def download_file(url: str, destination: Path) -> None:
     with urllib.request.urlopen(request, timeout=30) as response:
         temporary.write_bytes(response.read())
     temporary.replace(destination)
+
+
+def uninstall_script(
+    install_dir: Path,
+    bin_path: Path,
+    config_path: Path,
+    remove_config: bool,
+    dry_run: bool,
+) -> None:
+    remove_path(bin_path, dry_run)
+    remove_path(install_dir, dry_run)
+    if remove_config:
+        remove_path(config_path, dry_run)
+        config_parent = config_path.parent
+        if not dry_run and config_parent.exists() and not any(config_parent.iterdir()):
+            config_parent.rmdir()
+    else:
+        LOG.info("Keeping config: %s", config_path)
+
+
+def remove_path(path: Path, dry_run: bool) -> None:
+    if not path.exists() and not path.is_symlink():
+        LOG.info("Not found: %s", path)
+        return
+    LOG.info("%sRemove: %s", "[dry-run] " if dry_run else "", path)
+    if dry_run:
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def unpatch_discord(discord_data: Path, dry_run: bool) -> None:
+    version_dir = latest_version_dir(discord_data)
+    core_dir = find_core_dir(version_dir)
+    index_js = core_dir / "index.js"
+    restored_script = 'module.exports = require("./core.asar");\n'
+    if index_js.exists():
+        content = index_js.read_text(encoding="utf-8", errors="ignore")
+        if "betterdiscord" not in content.lower():
+            LOG.info("No BetterDiscord patch found: %s", index_js)
+            return
+    LOG.info("%sRestore: %s", "[dry-run] " if dry_run else "", index_js)
+    if not dry_run:
+        index_js.write_text(restored_script, encoding="utf-8")
 
 
 def install(options: Options) -> None:

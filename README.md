@@ -36,6 +36,9 @@ Useful options:
 --edit-config      Open the user config file for editing
 --show-config      Print the effective settings
 --update           Update the installer script from GitHub
+--uninstall        Remove the installer script
+--remove-config    Also remove config with --uninstall
+--unpatch          Remove BetterDiscord from Discord
 --no-notify         Disable macOS notifications
 --keep-open         Patch without quitting Discord first
 --no-reopen         Quit Discord for patching but do not reopen it
@@ -93,6 +96,24 @@ Update the installer script:
 
 ```sh
 betterdiscord --update
+```
+
+Remove the installer script:
+
+```sh
+betterdiscord --uninstall
+```
+
+Remove the installer script and its config:
+
+```sh
+betterdiscord --uninstall --remove-config
+```
+
+Remove BetterDiscord from Discord without removing this installer:
+
+```sh
+betterdiscord --unpatch
 ```
 
 The installer finds Discord's current `discord_desktop_core` by locating
