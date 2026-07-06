@@ -13,6 +13,14 @@ By default this installs files to:
 ```text
 ~/Library/Application Support/BetterDiscordCLIInstaller
 ~/.local/bin/betterdiscord
+~/.config/betterdiscord-cli-installer/config.json
+```
+
+During install, the config file is created if missing. The installer will ask
+whether to open it for editing. You can force that behavior with:
+
+```sh
+BDI_EDIT_CONFIG=1 curl -fsSL https://raw.githubusercontent.com/ctrlcmdshft/BetterDiscordCLIInstaller/main/install.sh | sh
 ```
 
 Run:
@@ -69,7 +77,7 @@ Edit that file to set normal behavior:
 Settings are applied in this order:
 
 ```text
-built-in defaults < config file < command-line options
+defaults < config file < command-line options
 ```
 
 Use `--config` to load a different config file:
