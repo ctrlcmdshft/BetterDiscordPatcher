@@ -33,7 +33,8 @@ betterdiscord --uninstall
 betterdiscord --help
 ```
 
-Remove old Discord `app-*` folders after previewing:
+Remove old Discord `app-*` folders after previewing. Cleanup keeps the newest
+`app-*` folder and protects the version matching the installed Discord app.
 
 ```sh
 betterdiscord --cleanup-old --dry-run

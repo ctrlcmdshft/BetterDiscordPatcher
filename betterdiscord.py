@@ -477,18 +477,25 @@ def cleanup_old_versions(release: DiscordRelease, keep: int, dry_run: bool, log_
         LOG.info("Discord data: %s", release.data_path)
 
     versions = discord_version_dirs(release.data_path)
-    kept = versions[-keep:]
-    removable = versions[:-keep]
+    cleanup_candidates = [path for path in versions if path.name.startswith("app-")]
+    active_version = discord_app_version(release)
+    protected_names = {f"app-{active_version}"} if active_version else set()
+    kept = sorted(
+        {*cleanup_candidates[-keep:], *(path for path in cleanup_candidates if path.name in protected_names)},
+        key=version_key,
+    )
+    removable = [path for path in cleanup_candidates if path not in kept]
+    preserved = [path for path in versions if path not in removable]
 
-    LOG.info("Discord app versions found: %d", len(versions))
+    LOG.info("Discord app-* versions found: %d", len(cleanup_candidates))
     LOG.info("Keeping: %s", ", ".join(path.name for path in kept))
     if not removable:
         LOG.info("No old Discord app version folders to remove.")
-        return kept
+        return preserved
 
     for version_dir in removable:
         remove_path(version_dir, dry_run)
-    return kept
+    return preserved
 
 
 def unpatch_discord(release: DiscordRelease, restart: bool, reopen: bool, dry_run: bool) -> None:
@@ -749,11 +756,21 @@ def open_discord(release: DiscordRelease) -> None:
 
 
 def log_discord_app_version(release: DiscordRelease) -> None:
+    version = discord_app_version(release)
+    if version:
+        LOG.info("%s app version: %s", release.name, version)
+        return
+    LOG.debug("Could not read %s app version", release.name)
+
+
+def discord_app_version(release: DiscordRelease) -> Optional[str]:
     try:
         with (release.app_path / "Contents/Info.plist").open("rb") as file:
-            LOG.info("%s app version: %s", release.name, plistlib.load(file).get("CFBundleShortVersionString", "unknown"))
+            version = plistlib.load(file).get("CFBundleShortVersionString")
+            return str(version) if version else None
     except Exception as error:
         LOG.debug("Could not read %s app version: %s", release.name, error)
+        return None
 
 
 def notify(title: str, message: str, enabled: bool) -> None:
