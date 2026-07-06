@@ -69,23 +69,16 @@ Edit that file to set normal behavior:
 Settings are applied in this order:
 
 ```text
-built-in defaults < config file < environment variables < command-line options
+built-in defaults < config file < command-line options
 ```
 
-Environment overrides are also supported:
+Use `--config` to load a different config file:
 
 ```sh
-BD_NOTIFY=0 betterdiscord
-BD_KEEP_OPEN=1 betterdiscord
-BD_REOPEN=0 betterdiscord
-BD_DOWNLOAD=0 betterdiscord
-BD_FORCE_DOWNLOAD=1 betterdiscord
-BD_WAIT_UPDATE=0 betterdiscord
-BD_DRY_RUN=1 betterdiscord
-BD_VERBOSE=1 betterdiscord
-BD_DISCORD_DATA=/path/to/discord betterdiscord
-BD_ASAR=/path/to/betterdiscord.asar betterdiscord
+betterdiscord --config ~/path/to/config.json --show-config
 ```
+
+The same path can also be supplied with `BD_CONFIG` for scripts that need it.
 
 The installer finds Discord's current `discord_desktop_core` by locating
 `core.asar`, then writes `index.js` beside it using BetterDiscord's injection

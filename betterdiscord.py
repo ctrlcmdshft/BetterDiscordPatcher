@@ -167,7 +167,6 @@ def built_in_defaults() -> dict:
 def merged_defaults(config_path: Path) -> dict:
     defaults = built_in_defaults()
     defaults.update(read_config(config_path))
-    apply_env(defaults)
     return defaults
 
 
@@ -194,26 +193,6 @@ def read_config(path: Path) -> dict:
         else:
             raise ValueError(f"Unknown config key: {key}")
     return result
-
-
-def apply_env(defaults: dict) -> None:
-    env_map = {
-        "BD_NOTIFY": "notify",
-        "BD_KEEP_OPEN": "keep_open",
-        "BD_REOPEN": "reopen",
-        "BD_DOWNLOAD": "download",
-        "BD_FORCE_DOWNLOAD": "force_download",
-        "BD_WAIT_UPDATE": "wait_update",
-        "BD_DRY_RUN": "dry_run",
-        "BD_VERBOSE": "verbose",
-    }
-    for env_name, key in env_map.items():
-        if env_name in os.environ:
-            defaults[key] = env_bool(env_name, bool(defaults[key]))
-    if "BD_DISCORD_DATA" in os.environ:
-        defaults["discord_data"] = Path(os.environ["BD_DISCORD_DATA"]).expanduser()
-    if "BD_ASAR" in os.environ:
-        defaults["bd_asar"] = Path(os.environ["BD_ASAR"]).expanduser()
 
 
 def write_config(path: Path, overwrite: bool) -> None:
@@ -251,13 +230,6 @@ def options_dict(args: argparse.Namespace) -> dict:
         "verbose": args.verbose,
         "wait_update": args.wait_update,
     }
-
-
-def env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def install(options: Options) -> None:
