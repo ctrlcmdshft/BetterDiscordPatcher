@@ -24,6 +24,9 @@ betterdiscord
 Useful options:
 
 ```sh
+--init-config      Create the user config file
+--edit-config      Open the user config file for editing
+--show-config      Print the effective settings
 --no-notify         Disable macOS notifications
 --keep-open         Patch without quitting Discord first
 --no-reopen         Quit Discord for patching but do not reopen it
@@ -33,8 +36,41 @@ Useful options:
 --verbose           Show debug logs
 ```
 
-You can set normal behavior by editing the `DEFAULT_*` values near the top of
-`betterdiscord.py`.
+Persistent config:
+
+```sh
+betterdiscord --init-config
+betterdiscord --edit-config
+```
+
+This creates:
+
+```text
+~/.config/betterdiscord-cli-installer/config.json
+```
+
+Edit that file to set normal behavior:
+
+```json
+{
+  "download": true,
+  "dry_run": false,
+  "force_download": false,
+  "keep_open": false,
+  "notify": false,
+  "reopen": true,
+  "verbose": false,
+  "wait_update": true,
+  "discord_data": "~/Library/Application Support/discord",
+  "bd_asar": "~/Library/Application Support/BetterDiscord/data/betterdiscord.asar"
+}
+```
+
+Settings are applied in this order:
+
+```text
+built-in defaults < config file < environment variables < command-line options
+```
 
 Environment overrides are also supported:
 

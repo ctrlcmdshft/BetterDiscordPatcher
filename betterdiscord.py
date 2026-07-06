@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import logging
 import os
 import platform
@@ -20,8 +21,8 @@ DISCORD_DATA = HOME / "Library/Application Support/discord"
 DISCORD_APP = Path("/Applications/Discord.app")
 BD_ASAR = HOME / "Library/Application Support/BetterDiscord/data/betterdiscord.asar"
 BD_ASAR_URL = "https://github.com/rauenzi/BetterDiscordApp/releases/latest/download/betterdiscord.asar"
+CONFIG_PATH = HOME / ".config/betterdiscord-cli-installer/config.json"
 
-# Default options. Edit these for your normal behavior.
 DEFAULT_NOTIFY = False
 DEFAULT_KEEP_OPEN = False
 DEFAULT_REOPEN = True
@@ -30,18 +31,6 @@ DEFAULT_FORCE_DOWNLOAD = False
 DEFAULT_WAIT_UPDATE = True
 DEFAULT_DRY_RUN = False
 DEFAULT_VERBOSE = False
-
-# Environment variable overrides use:
-#   BD_NOTIFY=0 betterdiscord
-#   BD_KEEP_OPEN=1 betterdiscord
-#   BD_REOPEN=0 betterdiscord
-#   BD_DOWNLOAD=0 betterdiscord
-#   BD_FORCE_DOWNLOAD=1 betterdiscord
-#   BD_WAIT_UPDATE=0 betterdiscord
-#   BD_DRY_RUN=1 betterdiscord
-#   BD_VERBOSE=1 betterdiscord
-#   BD_DISCORD_DATA=/path/to/discord betterdiscord
-#   BD_ASAR=/path/to/betterdiscord.asar betterdiscord
 
 INJECTION = """\
 // BetterDiscord's Injection Script
@@ -85,6 +74,18 @@ def main() -> int:
         LOG.error("This installer currently supports macOS only.")
         return 1
 
+    if args.init_config:
+        write_config(args.config, overwrite=args.force)
+        return 0
+
+    if args.edit_config:
+        edit_config(args.config)
+        return 0
+
+    if args.show_config:
+        print(json.dumps(options_dict(args), indent=2, sort_keys=True))
+        return 0
+
     options = Options(
         discord_data=args.discord_data.expanduser(),
         bd_asar=args.bd_asar.expanduser(),
@@ -106,9 +107,19 @@ def main() -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    defaults = env_defaults()
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config", type=Path, default=Path(os.environ.get("BD_CONFIG", CONFIG_PATH)))
+    pre_args, _ = pre_parser.parse_known_args()
+
+    defaults = merged_defaults(pre_args.config.expanduser())
     parser = argparse.ArgumentParser(description="Small macOS BetterDiscord installer.")
     parser.set_defaults(**defaults)
+
+    parser.add_argument("--config", type=Path, default=pre_args.config, help="config file path")
+    parser.add_argument("--init-config", action="store_true", help="create a config file with current defaults")
+    parser.add_argument("--edit-config", action="store_true", help="open the config file for editing")
+    parser.add_argument("--show-config", action="store_true", help="print effective settings and exit")
+    parser.add_argument("--force", action="store_true", help="overwrite an existing config with --init-config")
 
     notify = parser.add_mutually_exclusive_group()
     notify.add_argument("--notify", dest="notify", action="store_true", help="enable macOS notifications")
@@ -138,18 +149,107 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def env_defaults() -> dict:
+def built_in_defaults() -> dict:
     return {
-        "notify": env_bool("BD_NOTIFY", DEFAULT_NOTIFY),
-        "keep_open": env_bool("BD_KEEP_OPEN", DEFAULT_KEEP_OPEN),
-        "reopen": env_bool("BD_REOPEN", DEFAULT_REOPEN),
-        "download": env_bool("BD_DOWNLOAD", DEFAULT_DOWNLOAD),
-        "force_download": env_bool("BD_FORCE_DOWNLOAD", DEFAULT_FORCE_DOWNLOAD),
-        "wait_update": env_bool("BD_WAIT_UPDATE", DEFAULT_WAIT_UPDATE),
-        "dry_run": env_bool("BD_DRY_RUN", DEFAULT_DRY_RUN),
-        "verbose": env_bool("BD_VERBOSE", DEFAULT_VERBOSE),
-        "discord_data": Path(os.environ.get("BD_DISCORD_DATA", str(DISCORD_DATA))),
-        "bd_asar": Path(os.environ.get("BD_ASAR", str(BD_ASAR))),
+        "notify": DEFAULT_NOTIFY,
+        "keep_open": DEFAULT_KEEP_OPEN,
+        "reopen": DEFAULT_REOPEN,
+        "download": DEFAULT_DOWNLOAD,
+        "force_download": DEFAULT_FORCE_DOWNLOAD,
+        "wait_update": DEFAULT_WAIT_UPDATE,
+        "dry_run": DEFAULT_DRY_RUN,
+        "verbose": DEFAULT_VERBOSE,
+        "discord_data": DISCORD_DATA,
+        "bd_asar": BD_ASAR,
+    }
+
+
+def merged_defaults(config_path: Path) -> dict:
+    defaults = built_in_defaults()
+    defaults.update(read_config(config_path))
+    apply_env(defaults)
+    return defaults
+
+
+def read_config(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, dict):
+        raise ValueError(f"Config must be a JSON object: {path}")
+
+    result = {}
+    bool_keys = {"notify", "keep_open", "reopen", "download", "force_download", "wait_update", "dry_run", "verbose"}
+    path_keys = {"discord_data", "bd_asar"}
+    for key, value in data.items():
+        if key in bool_keys:
+            if not isinstance(value, bool):
+                raise ValueError(f"Config value must be true or false: {key}")
+            result[key] = value
+        elif key in path_keys:
+            if not isinstance(value, str):
+                raise ValueError(f"Config value must be a path string: {key}")
+            result[key] = Path(value).expanduser()
+        else:
+            raise ValueError(f"Unknown config key: {key}")
+    return result
+
+
+def apply_env(defaults: dict) -> None:
+    env_map = {
+        "BD_NOTIFY": "notify",
+        "BD_KEEP_OPEN": "keep_open",
+        "BD_REOPEN": "reopen",
+        "BD_DOWNLOAD": "download",
+        "BD_FORCE_DOWNLOAD": "force_download",
+        "BD_WAIT_UPDATE": "wait_update",
+        "BD_DRY_RUN": "dry_run",
+        "BD_VERBOSE": "verbose",
+    }
+    for env_name, key in env_map.items():
+        if env_name in os.environ:
+            defaults[key] = env_bool(env_name, bool(defaults[key]))
+    if "BD_DISCORD_DATA" in os.environ:
+        defaults["discord_data"] = Path(os.environ["BD_DISCORD_DATA"]).expanduser()
+    if "BD_ASAR" in os.environ:
+        defaults["bd_asar"] = Path(os.environ["BD_ASAR"]).expanduser()
+
+
+def write_config(path: Path, overwrite: bool) -> None:
+    path = path.expanduser()
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"Config already exists: {path}. Use --force to overwrite.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = options_dict(argparse.Namespace(**built_in_defaults()))
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    LOG.info("Wrote config: %s", path)
+
+
+def edit_config(path: Path) -> None:
+    path = path.expanduser()
+    if not path.exists():
+        write_config(path, overwrite=False)
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if editor:
+        subprocess.run([editor, str(path)], check=True)
+        return
+    subprocess.run(["open", "-t", str(path)], check=True)
+
+
+def options_dict(args: argparse.Namespace) -> dict:
+    return {
+        "bd_asar": str(args.bd_asar),
+        "discord_data": str(args.discord_data),
+        "download": args.download,
+        "dry_run": args.dry_run,
+        "force_download": args.force_download,
+        "keep_open": args.keep_open,
+        "notify": args.notify,
+        "reopen": args.reopen,
+        "verbose": args.verbose,
+        "wait_update": args.wait_update,
     }
 
 
