@@ -56,17 +56,14 @@ Config keys:
 
 | Key | Meaning |
 | --- | --- |
-| `release` | Discord release to patch: `auto`, `all`, `stable`, `ptb`, `canary`, or `development`. `auto` detects installed apps. |
+| `release` | Discord release to patch: `stable`, `auto`, `all`, `ptb`, `canary`, or `development`. |
 | `notify` | Show macOS notifications. |
 | `keep_open` | Patch without quitting Discord first. |
 | `reopen` | Reopen Discord after patching. |
 | `download` | Download or refresh `betterdiscord.asar`. |
-| `force_download` | Ignore the cached ETag and download again. |
 | `wait_update` | Wait for Discord's updater to finish before patching. |
 | `cleanup_before_install` | Remove old Discord `app-*` folders before patching. |
 | `keep_versions` | Number of Discord `app-*` versions to keep when cleaning. |
-| `dry_run` | Show actions without writing files. |
-| `verbose` | Show more detailed logs. |
 | `discord_data` | Discord data folder to patch. |
 | `bd_asar` | Destination for `betterdiscord.asar`. |
 

@@ -29,7 +29,7 @@ REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
 CONFIG_TEMPLATE = {
-    "release": "auto",
+    "release": "stable",
     "notify": False,
     "keep_open": False,
     "reopen": True,
@@ -222,7 +222,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init-config", action="store_true", help="create a config file with current defaults")
     parser.add_argument("--format-config", action="store_true", help="rewrite the config file in the standard order")
     parser.add_argument("--edit-config", action="store_true", help="open the config file for editing")
-    parser.add_argument("--show-config", action="store_true", help="print effective settings and exit")
+    parser.add_argument("--show-config", action="store_true", help="print config values and exit")
     parser.add_argument("--update", action="store_true", help="update this installer script from GitHub")
     parser.add_argument("--uninstall", action="store_true", help="remove the installer script")
     parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
@@ -385,15 +385,12 @@ def options_dict(args: argparse.Namespace) -> dict:
         "discord_data": str(args.discord_data),
         "bd_asar": str(args.bd_asar),
         "download": args.download,
-        "force_download": args.force_download,
         "wait_update": args.wait_update,
         "cleanup_before_install": args.cleanup_before_install,
         "keep_versions": args.keep_versions,
         "keep_open": args.keep_open,
         "reopen": args.reopen,
         "notify": args.notify,
-        "dry_run": args.dry_run,
-        "verbose": args.verbose,
     }
 
 
