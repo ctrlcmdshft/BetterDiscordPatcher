@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -246,7 +247,13 @@ def main() -> int:
     if args.cleanup_old:
         try:
             for discord_data in args.target_discord_data:
-                cleanup_old_versions(discord_data, keep=args.keep_versions, dry_run=args.dry_run)
+                protected_versions = sanitize_shipit_request(discord_data, dry_run=args.dry_run)
+                cleanup_old_versions(
+                    discord_data,
+                    keep=args.keep_versions,
+                    dry_run=args.dry_run,
+                    protected_paths=protected_versions,
+                )
         except Exception as error:
             LOG.error("Cleanup failed: %s", error)
             return 1
@@ -820,19 +827,47 @@ Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
     )
 
 
-def cleanup_old_versions(discord_data: Path, keep: int, dry_run: bool) -> list[Path]:
+def cleanup_old_versions(
+    discord_data: Path,
+    keep: int,
+    dry_run: bool,
+    protected_paths: Optional[set[Path]] = None,
+) -> list[Path]:
     if keep < 1:
         raise ValueError("--keep-versions must be 1 or greater")
 
     versions = discord_version_dirs(discord_data)
-    cleanup_candidates = [path for path in versions if path.name.startswith("app-")]
+    cleanup_candidates = [
+        path for path in versions if path.name.startswith("app-") and has_discord_desktop_core(path)
+    ]
+    incomplete_app_dirs = [
+        path for path in versions if path.name.startswith("app-") and path not in cleanup_candidates
+    ]
     kept = cleanup_candidates[-keep:]
-    removable = [path for path in cleanup_candidates if path not in kept]
+    protected_paths = protected_paths or set()
+    resolved_protected_paths = {path.resolve(strict=False) for path in protected_paths}
+    removable = [
+        path
+        for path in cleanup_candidates
+        if path not in kept
+        and path not in protected_paths
+        and path.resolve(strict=False) not in resolved_protected_paths
+    ]
     preserved = [path for path in versions if path not in removable]
 
     LOG.info("Discord app-* versions found: %d", len(cleanup_candidates))
     if kept:
         LOG.info("Keeping: %s", ", ".join(path.name for path in kept))
+    if incomplete_app_dirs:
+        LOG.info("Keeping incomplete updater folders: %s", ", ".join(path.name for path in incomplete_app_dirs))
+    protected_kept = [
+        path
+        for path in cleanup_candidates
+        if path not in kept
+        and (path in protected_paths or path.resolve(strict=False) in resolved_protected_paths)
+    ]
+    if protected_kept:
+        LOG.info("Keeping active updater bundle: %s", ", ".join(path.name for path in protected_kept))
     if not removable:
         LOG.info("No old Discord app version folders to remove.")
         return preserved
@@ -883,6 +918,7 @@ def install(options: Options) -> None:
     if options.wait_update and not wait_for_update(options.discord_data, update_dir):
         notify("BetterDiscord", "Discord is still updating", options.notify)
         raise RuntimeError("Discord update did not finish in time")
+    protected_versions = sanitize_shipit_request(options.discord_data, dry_run=options.dry_run)
 
     was_running = discord_running(options.discord_data)
     if was_running and options.restart and not options.dry_run:
@@ -895,6 +931,7 @@ def install(options: Options) -> None:
                 options.discord_data,
                 keep=options.keep_versions,
                 dry_run=options.dry_run,
+                protected_paths=protected_versions,
             )
         except PermissionError as error:
             if platform.system() == "Windows":
@@ -904,7 +941,14 @@ def install(options: Options) -> None:
                 raise
 
     version_dir = latest_version_dir(options.discord_data, version_dirs=version_dirs)
-    core_dirs = discord_core_dirs(options.discord_data, version_dirs=version_dirs)
+    try:
+        core_dirs = discord_core_dirs(options.discord_data, version_dirs=version_dirs)
+    except FileNotFoundError as error:
+        raise FileNotFoundError(
+            f"{error}\n"
+            "Discord's local desktop-core modules are missing. Reinstall or reopen Discord once "
+            "without cleanup so its updater can rebuild the app version folder."
+        ) from error
     LOG.info("Latest Discord version: %s", version_dir.name)
     LOG.info("Discord cores found: %d", len(core_dirs))
 
@@ -962,6 +1006,13 @@ def discord_version_dirs(discord_data: Path) -> list[Path]:
     if not versions:
         raise FileNotFoundError(f"No Discord version folders found in {discord_data}")
     return versions
+
+
+def has_discord_desktop_core(version_dir: Path) -> bool:
+    modules = version_dir / "modules"
+    if not modules.exists():
+        return False
+    return any("discord_desktop_core" in str(core_asar) for core_asar in modules.rglob("core.asar"))
 
 
 def version_key(path: Path) -> tuple[int, ...]:
@@ -1077,6 +1128,54 @@ def download_asar(path: Path, force: bool, dry_run: bool) -> bool:
 def discord_release_for_data(discord_data: Optional[Path] = None) -> DiscordRelease:
     release = release_name_for_discord_data(discord_data or DISCORD_DATA)
     return DISCORD_RELEASES.get(release, DISCORD_RELEASES["stable"])
+
+
+def file_url_to_path(url: str) -> Optional[Path]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "file" or not parsed.path:
+        return None
+    return Path(urllib.parse.unquote(parsed.path))
+
+
+def version_dir_for_path(discord_data: Path, path: Path) -> Optional[Path]:
+    try:
+        data_root = discord_data.resolve(strict=False)
+        current = path.resolve(strict=False)
+    except OSError:
+        data_root = discord_data
+        current = path
+
+    for candidate in (current, *current.parents):
+        if candidate.parent == data_root and candidate.name.startswith("app-"):
+            return candidate
+    return None
+
+
+def sanitize_shipit_request(discord_data: Path, dry_run: bool) -> set[Path]:
+    if platform.system() == "Windows":
+        return set()
+
+    request_path = discord_data / "ShipIt_request.json"
+    if not request_path.exists():
+        return set()
+
+    try:
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        LOG.warning("Could not inspect ShipIt request: %s", error)
+        return set()
+
+    update_path = file_url_to_path(str(request.get("updateBundleURL", "")))
+    if update_path is None:
+        return set()
+
+    version_dir = version_dir_for_path(discord_data, update_path)
+    if update_path.exists():
+        return {version_dir} if version_dir else set()
+
+    LOG.warning("Removing stale ShipIt request for missing update bundle: %s", update_path)
+    remove_path(request_path, dry_run)
+    return set()
 
 
 def discord_update_dir(discord_data: Optional[Path] = None) -> Optional[Path]:
