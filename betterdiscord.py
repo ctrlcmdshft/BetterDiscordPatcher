@@ -1187,6 +1187,9 @@ def discord_update_dir(discord_data: Optional[Path] = None) -> Optional[Path]:
             url = plistlib.load(file).get("updateBundleURL", "")
     except FileNotFoundError:
         return None
+    except (OSError, plistlib.InvalidFileException) as error:
+        LOG.warning("Could not inspect Discord updater state: %s", error)
+        return None
     if url.startswith("file://"):
         url = url[7:-13]
     return Path(url) if url else None
