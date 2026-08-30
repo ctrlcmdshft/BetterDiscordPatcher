@@ -39,7 +39,9 @@ betterdiscord --dry-run
 betterdiscord --edit-config
 betterdiscord --format-config
 betterdiscord --cleanup-old --dry-run
+betterdiscord --list-bd-releases 10
 betterdiscord --downgrade --dry-run
+betterdiscord --downgrade --bd-previous 3
 betterdiscord --bd-release v1.14.0
 betterdiscord --unpatch
 betterdiscord --update
@@ -135,11 +137,14 @@ betterdiscord --cleanup-old
 
 Downgrade downloads the previous stable BetterDiscord `betterdiscord.asar`
 release, then patches Discord's desktop core. You can also install a specific
-BetterDiscord release tag.
+BetterDiscord release tag or choose from recent prior stable releases.
 
 ```sh
+betterdiscord --list-bd-releases 10
 betterdiscord --downgrade --dry-run
 betterdiscord --downgrade
+betterdiscord --downgrade --bd-previous 3
+betterdiscord --bd-release previous:3
 betterdiscord --bd-release v1.14.0
 ```
 

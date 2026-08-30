@@ -25,7 +25,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.1.7"
+SCRIPT_VERSION = "2.1.8"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -229,6 +229,10 @@ def main() -> int:
         print(json.dumps(options_dict(args), indent=2))
         return 0
 
+    if args.list_bd_releases is not None:
+        list_betterdiscord_releases(args.list_bd_releases)
+        return 0
+
     if args.update:
         update_script(args.update_dir.expanduser(), args.raw_base)
         return 0
@@ -283,7 +287,7 @@ def main() -> int:
                 reopen=args.reopen,
                 download=args.download,
                 force_download=args.force_download,
-                bd_release="previous" if args.downgrade else args.bd_release,
+                bd_release=f"previous:{args.bd_previous}" if args.downgrade else args.bd_release,
                 wait_update=args.wait_update,
                 cleanup_before_install=args.cleanup_before_install,
                 keep_versions=args.keep_versions,
@@ -310,13 +314,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--format-config", action="store_true", help="rewrite the config file in the standard order")
     parser.add_argument("--edit-config", action="store_true", help="open the config file for editing")
     parser.add_argument("--show-config", action="store_true", help="print config values and exit")
+    parser.add_argument("--list-bd-releases", nargs="?", const=10, type=int, metavar="COUNT", help="list recent stable BetterDiscord releases")
     parser.add_argument("--check-update", action="store_true", help="check whether a newer script version is available")
     parser.add_argument("--update", action="store_true", help="update this installer script from GitHub")
     parser.add_argument("--uninstall", action="store_true", help="remove the installer script")
     parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
     parser.add_argument("--unpatch", action="store_true", help="remove the BetterDiscord loader from Discord")
     parser.add_argument("--cleanup-old", action="store_true", help="remove old Discord app version folders")
-    parser.add_argument("--downgrade", action="store_true", help="download the previous BetterDiscord release and patch Discord")
+    parser.add_argument("--downgrade", action="store_true", help="download a prior BetterDiscord release and patch Discord")
     parser.add_argument(
         "--update-dir",
         type=Path,
@@ -372,7 +377,8 @@ def parse_args() -> argparse.Namespace:
     cleanup_install.add_argument("--no-cleanup-before-install", dest="cleanup_before_install", action="store_false", help="keep old Discord app version folders before patching")
 
     parser.add_argument("--force-download", action="store_true", default=defaults["force_download"], help="download betterdiscord.asar even if cached")
-    parser.add_argument("--bd-release", default="latest", help="BetterDiscord release to download: latest, previous, or a tag such as v1.14.0")
+    parser.add_argument("--bd-release", default="latest", help="BetterDiscord release to download: latest, previous, previous:N, or a tag such as v1.14.0")
+    parser.add_argument("--bd-previous", type=int, default=1, help="prior stable BetterDiscord release number for --downgrade; 1 means previous")
     parser.add_argument("--dry-run", action="store_true", default=defaults["dry_run"], help="show what would change without writing files")
     parser.add_argument("--verbose", "-v", action="store_true", default=defaults["verbose"], help="show debug logs")
     parser.add_argument("--keep-versions", type=int, default=defaults["keep_versions"], help="number of Discord app versions to keep when cleaning old versions")
@@ -380,6 +386,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bd-asar", type=Path, default=defaults["bd_asar"], help="BetterDiscord asar output path")
     parser.set_defaults(release="stable")
     args = parser.parse_args()
+    if args.bd_previous < 1:
+        parser.error("--bd-previous must be 1 or greater")
+    if args.list_bd_releases is not None and args.list_bd_releases < 1:
+        parser.error("--list-bd-releases must be 1 or greater")
     args.release_explicit = any(
         arg in {"--stable", "--ptb", "--canary", "--all", "--auto"}
         for arg in sys.argv[1:]
@@ -1143,17 +1153,19 @@ def betterdiscord_asar_download(release: str) -> tuple[str, str]:
         return BD_ASAR_URL, "latest"
 
     releases = betterdiscord_releases()
-    if release == "previous":
-        stable_releases = [
-            item
-            for item in releases
-            if not item.get("draft") and not item.get("prerelease") and betterdiscord_asar_asset_url(item)
-        ]
-        if len(stable_releases) < 2:
-            raise RuntimeError("Could not find a previous BetterDiscord release with betterdiscord.asar.")
-        selected = stable_releases[1]
-        tag = selected.get("tag_name", "previous")
-        return betterdiscord_asar_asset_url(selected), f"previous ({tag})"
+    previous_count = previous_release_count(release)
+    if previous_count is not None:
+        stable_releases = stable_betterdiscord_releases(releases)
+        selected_index = previous_count
+        if len(stable_releases) <= selected_index:
+            raise RuntimeError(
+                f"Could not find BetterDiscord previous release #{previous_count}; "
+                f"only {max(len(stable_releases) - 1, 0)} prior stable releases are available."
+            )
+        selected = stable_releases[selected_index]
+        tag = selected.get("tag_name", f"previous:{previous_count}")
+        asset_url = betterdiscord_asar_asset_url(selected)
+        return asset_url, f"previous #{previous_count} ({tag})"
 
     for item in releases:
         if item.get("tag_name") != release:
@@ -1164,6 +1176,40 @@ def betterdiscord_asar_download(release: str) -> tuple[str, str]:
         return asset_url, release
 
     raise RuntimeError(f"BetterDiscord release not found: {release}")
+
+
+def previous_release_count(release: str) -> Optional[int]:
+    if release == "previous":
+        return 1
+    match = re.fullmatch(r"previous:(\d+)", release)
+    if not match:
+        return None
+    count = int(match.group(1))
+    if count < 1:
+        raise RuntimeError("BetterDiscord previous release number must be 1 or greater.")
+    return count
+
+
+def stable_betterdiscord_releases(releases: list[dict]) -> list[dict]:
+    return [
+        item
+        for item in releases
+        if not item.get("draft") and not item.get("prerelease") and betterdiscord_asar_asset_url(item)
+    ]
+
+
+def list_betterdiscord_releases(count: int) -> None:
+    releases = stable_betterdiscord_releases(betterdiscord_releases())
+    if not releases:
+        raise RuntimeError("Could not find any stable BetterDiscord releases with betterdiscord.asar.")
+
+    for index, item in enumerate(releases[:count]):
+        tag = item.get("tag_name", "unknown")
+        if index == 0:
+            selector = "latest"
+        else:
+            selector = f"previous:{index}"
+        print(f"{selector:12} {tag}")
 
 
 def betterdiscord_releases() -> list[dict]:
