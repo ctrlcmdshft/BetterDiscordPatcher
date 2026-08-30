@@ -40,6 +40,7 @@ betterdiscord --edit-config
 betterdiscord --format-config
 betterdiscord --cleanup-old --dry-run
 betterdiscord --downgrade --dry-run
+betterdiscord --bd-release v1.14.0
 betterdiscord --unpatch
 betterdiscord --update
 betterdiscord --uninstall
@@ -132,13 +133,14 @@ betterdiscord --cleanup-old
 
 ## Downgrade
 
-Downgrade removes the newest cached Discord `app-*` folder, then patches the
-previous cached version. This only works when Discord still has at least two
-local app versions.
+Downgrade downloads the previous stable BetterDiscord `betterdiscord.asar`
+release, then patches Discord's desktop core. You can also install a specific
+BetterDiscord release tag.
 
 ```sh
 betterdiscord --downgrade --dry-run
 betterdiscord --downgrade
+betterdiscord --bd-release v1.14.0
 ```
 
 ## Uninstall

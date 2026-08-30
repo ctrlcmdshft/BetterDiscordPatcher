@@ -21,9 +21,11 @@ from typing import Optional
 LOG = logging.getLogger("betterdiscord")
 
 HOME = Path.home()
-BD_ASAR_URL = "https://github.com/rauenzi/BetterDiscordApp/releases/latest/download/betterdiscord.asar"
+BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
+BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
+BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.1.6"
+SCRIPT_VERSION = "2.1.7"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -183,6 +185,7 @@ class Options:
     reopen: bool
     download: bool
     force_download: bool
+    bd_release: str
     wait_update: bool
     cleanup_before_install: bool
     keep_versions: int
@@ -259,29 +262,6 @@ def main() -> int:
             return 1
         return 0
 
-    if args.downgrade:
-        try:
-            for discord_data in args.target_discord_data:
-                options = Options(
-                    release=release_name_for_discord_data(discord_data),
-                    discord_data=discord_data,
-                    bd_asar=args.bd_asar.expanduser(),
-                    notify=args.notify,
-                    restart=not args.keep_open,
-                    reopen=args.reopen,
-                    download=args.download,
-                    force_download=args.force_download,
-                    wait_update=args.wait_update,
-                    cleanup_before_install=False,
-                    keep_versions=args.keep_versions,
-                    dry_run=args.dry_run,
-                )
-                downgrade_discord(options)
-        except Exception as error:
-            LOG.error("Downgrade failed: %s", error)
-            return 1
-        return 0
-
     if args.uninstall:
         uninstall_script(
             args.update_dir.expanduser(),
@@ -303,6 +283,7 @@ def main() -> int:
                 reopen=args.reopen,
                 download=args.download,
                 force_download=args.force_download,
+                bd_release="previous" if args.downgrade else args.bd_release,
                 wait_update=args.wait_update,
                 cleanup_before_install=args.cleanup_before_install,
                 keep_versions=args.keep_versions,
@@ -335,7 +316,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
     parser.add_argument("--unpatch", action="store_true", help="remove the BetterDiscord loader from Discord")
     parser.add_argument("--cleanup-old", action="store_true", help="remove old Discord app version folders")
-    parser.add_argument("--downgrade", action="store_true", help="remove the newest Discord app version and patch the previous cached version")
+    parser.add_argument("--downgrade", action="store_true", help="download the previous BetterDiscord release and patch Discord")
     parser.add_argument(
         "--update-dir",
         type=Path,
@@ -391,6 +372,7 @@ def parse_args() -> argparse.Namespace:
     cleanup_install.add_argument("--no-cleanup-before-install", dest="cleanup_before_install", action="store_false", help="keep old Discord app version folders before patching")
 
     parser.add_argument("--force-download", action="store_true", default=defaults["force_download"], help="download betterdiscord.asar even if cached")
+    parser.add_argument("--bd-release", default="latest", help="BetterDiscord release to download: latest, previous, or a tag such as v1.14.0")
     parser.add_argument("--dry-run", action="store_true", default=defaults["dry_run"], help="show what would change without writing files")
     parser.add_argument("--verbose", "-v", action="store_true", default=defaults["verbose"], help="show debug logs")
     parser.add_argument("--keep-versions", type=int, default=defaults["keep_versions"], help="number of Discord app versions to keep when cleaning old versions")
@@ -901,76 +883,6 @@ def cleanup_old_versions(
     return preserved
 
 
-def downgrade_discord(options: Options) -> None:
-    LOG.info("BetterDiscord installer script v%s", SCRIPT_VERSION)
-    LOG.info("Release: %s", options.release)
-    LOG.info("Discord data: %s", options.discord_data)
-    LOG.info("BetterDiscord asar: %s", options.bd_asar)
-    notify("BetterDiscord", "Preparing downgrade", options.notify)
-
-    update_dir = discord_update_dir(options.discord_data)
-    if options.wait_update and not wait_for_update(options.discord_data, update_dir):
-        notify("BetterDiscord", "Discord is still updating", options.notify)
-        raise RuntimeError("Discord update did not finish in time")
-    protected_versions = sanitize_shipit_request(options.discord_data, dry_run=options.dry_run)
-
-    was_running = discord_running(options.discord_data)
-    if was_running and options.restart and not options.dry_run:
-        quit_discord(options.discord_data)
-
-    try:
-        previous_version = downgrade_version_dir(
-            options.discord_data,
-            dry_run=options.dry_run,
-            protected_paths=protected_versions,
-        )
-        core_dirs = discord_core_dirs(options.discord_data, version_dirs=[previous_version])
-        LOG.info("Downgraded Discord version: %s", previous_version.name)
-        LOG.info("Discord cores found: %d", len(core_dirs))
-
-        if options.download:
-            download_asar(options.bd_asar, force=options.force_download, dry_run=options.dry_run)
-        changed = 0
-        for core_dir in core_dirs:
-            if patch_core(core_dir, dry_run=options.dry_run):
-                changed += 1
-        LOG.info("Discord cores patched: %d", changed)
-    finally:
-        if was_running and options.restart and options.reopen and not options.dry_run:
-            open_discord(options.discord_data)
-
-    notify("BetterDiscord", "Downgrade complete", options.notify)
-
-
-def downgrade_version_dir(
-    discord_data: Path,
-    dry_run: bool,
-    protected_paths: Optional[set[Path]] = None,
-) -> Path:
-    versions = [
-        path
-        for path in discord_version_dirs(discord_data)
-        if path.name.startswith("app-") and has_discord_desktop_core(path)
-    ]
-    if len(versions) < 2:
-        raise FileNotFoundError(
-            f"Need at least two cached Discord app versions to downgrade; found {len(versions)}."
-        )
-
-    current_version = versions[-1]
-    previous_version = versions[-2]
-    protected_paths = protected_paths or set()
-    resolved_protected_paths = {path.resolve(strict=False) for path in protected_paths}
-    current_resolved = current_version.resolve(strict=False)
-    if current_version in protected_paths or current_resolved in resolved_protected_paths:
-        raise RuntimeError(f"Newest Discord version is still owned by the updater: {current_version}")
-
-    LOG.info("Current Discord version: %s", current_version.name)
-    LOG.info("Previous Discord version: %s", previous_version.name)
-    remove_path(current_version, dry_run)
-    return previous_version
-
-
 def unpatch_discord(discord_data: Path, restart: bool, reopen: bool, dry_run: bool) -> None:
     index_paths = discord_core_index_paths(discord_data)
     restored_script = 'module.exports = require("./core.asar");\n'
@@ -1048,7 +960,12 @@ def install(options: Options) -> None:
 
     try:
         if options.download:
-            download_asar(options.bd_asar, force=options.force_download, dry_run=options.dry_run)
+            download_asar(
+                options.bd_asar,
+                force=options.force_download,
+                dry_run=options.dry_run,
+                release=options.bd_release,
+            )
         changed = 0
         for core_dir in core_dirs:
             if patch_core(core_dir, dry_run=options.dry_run):
@@ -1191,13 +1108,15 @@ def patch_core(core_dir: Path, dry_run: bool) -> bool:
     return True
 
 
-def download_asar(path: Path, force: bool, dry_run: bool) -> bool:
+def download_asar(path: Path, force: bool, dry_run: bool, release: str = "latest") -> bool:
     etag_path = path.with_suffix(".etag")
-    request = urllib.request.Request(BD_ASAR_URL, headers={"User-Agent": "BetterDiscordPatcher/2.0"})
-    if path.exists() and etag_path.exists() and not force:
+    release = release.strip() or "latest"
+    url, label = betterdiscord_asar_download(release)
+    request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}"})
+    if release == "latest" and path.exists() and etag_path.exists() and not force:
         request.add_header("If-None-Match", etag_path.read_text(encoding="utf-8").strip())
 
-    LOG.info("%sDownload BetterDiscord asar", "[dry-run] " if dry_run else "")
+    LOG.info("%sDownload BetterDiscord asar: %s", "[dry-run] " if dry_run else "", label)
     if dry_run:
         return False
 
@@ -1217,6 +1136,57 @@ def download_asar(path: Path, force: bool, dry_run: bool) -> bool:
         etag_path.write_text(etag, encoding="utf-8")
     LOG.info("Saved %d KB to %s", len(data) // 1024, path)
     return True
+
+
+def betterdiscord_asar_download(release: str) -> tuple[str, str]:
+    if release == "latest":
+        return BD_ASAR_URL, "latest"
+
+    releases = betterdiscord_releases()
+    if release == "previous":
+        stable_releases = [
+            item
+            for item in releases
+            if not item.get("draft") and not item.get("prerelease") and betterdiscord_asar_asset_url(item)
+        ]
+        if len(stable_releases) < 2:
+            raise RuntimeError("Could not find a previous BetterDiscord release with betterdiscord.asar.")
+        selected = stable_releases[1]
+        tag = selected.get("tag_name", "previous")
+        return betterdiscord_asar_asset_url(selected), f"previous ({tag})"
+
+    for item in releases:
+        if item.get("tag_name") != release:
+            continue
+        asset_url = betterdiscord_asar_asset_url(item)
+        if not asset_url:
+            raise RuntimeError(f"BetterDiscord release has no betterdiscord.asar asset: {release}")
+        return asset_url, release
+
+    raise RuntimeError(f"BetterDiscord release not found: {release}")
+
+
+def betterdiscord_releases() -> list[dict]:
+    request = urllib.request.Request(
+        BD_RELEASES_API,
+        headers={
+            "User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        releases = json.loads(response.read().decode("utf-8"))
+    if not isinstance(releases, list):
+        raise RuntimeError("Unexpected BetterDiscord releases response.")
+    return releases
+
+
+def betterdiscord_asar_asset_url(release: dict) -> Optional[str]:
+    for asset in release.get("assets", []):
+        if asset.get("name") == "betterdiscord.asar":
+            url = asset.get("browser_download_url")
+            return str(url) if url else None
+    return None
 
 
 def discord_release_for_data(discord_data: Optional[Path] = None) -> DiscordRelease:
