@@ -39,6 +39,7 @@ betterdiscord --dry-run
 betterdiscord --edit-config
 betterdiscord --format-config
 betterdiscord --cleanup-old --dry-run
+betterdiscord --downgrade --dry-run
 betterdiscord --unpatch
 betterdiscord --update
 betterdiscord --uninstall
@@ -127,6 +128,17 @@ Cleanup only removes old `app-*` folders and keeps the newest app version folder
 ```sh
 betterdiscord --cleanup-old --dry-run
 betterdiscord --cleanup-old
+```
+
+## Downgrade
+
+Downgrade removes the newest cached Discord `app-*` folder, then patches the
+previous cached version. This only works when Discord still has at least two
+local app versions.
+
+```sh
+betterdiscord --downgrade --dry-run
+betterdiscord --downgrade
 ```
 
 ## Uninstall

@@ -23,7 +23,7 @@ LOG = logging.getLogger("betterdiscord")
 HOME = Path.home()
 BD_ASAR_URL = "https://github.com/rauenzi/BetterDiscordApp/releases/latest/download/betterdiscord.asar"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.1.5"
+SCRIPT_VERSION = "2.1.6"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -259,6 +259,29 @@ def main() -> int:
             return 1
         return 0
 
+    if args.downgrade:
+        try:
+            for discord_data in args.target_discord_data:
+                options = Options(
+                    release=release_name_for_discord_data(discord_data),
+                    discord_data=discord_data,
+                    bd_asar=args.bd_asar.expanduser(),
+                    notify=args.notify,
+                    restart=not args.keep_open,
+                    reopen=args.reopen,
+                    download=args.download,
+                    force_download=args.force_download,
+                    wait_update=args.wait_update,
+                    cleanup_before_install=False,
+                    keep_versions=args.keep_versions,
+                    dry_run=args.dry_run,
+                )
+                downgrade_discord(options)
+        except Exception as error:
+            LOG.error("Downgrade failed: %s", error)
+            return 1
+        return 0
+
     if args.uninstall:
         uninstall_script(
             args.update_dir.expanduser(),
@@ -312,6 +335,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
     parser.add_argument("--unpatch", action="store_true", help="remove the BetterDiscord loader from Discord")
     parser.add_argument("--cleanup-old", action="store_true", help="remove old Discord app version folders")
+    parser.add_argument("--downgrade", action="store_true", help="remove the newest Discord app version and patch the previous cached version")
     parser.add_argument(
         "--update-dir",
         type=Path,
@@ -875,6 +899,76 @@ def cleanup_old_versions(
     for version_dir in removable:
         remove_path(version_dir, dry_run)
     return preserved
+
+
+def downgrade_discord(options: Options) -> None:
+    LOG.info("BetterDiscord installer script v%s", SCRIPT_VERSION)
+    LOG.info("Release: %s", options.release)
+    LOG.info("Discord data: %s", options.discord_data)
+    LOG.info("BetterDiscord asar: %s", options.bd_asar)
+    notify("BetterDiscord", "Preparing downgrade", options.notify)
+
+    update_dir = discord_update_dir(options.discord_data)
+    if options.wait_update and not wait_for_update(options.discord_data, update_dir):
+        notify("BetterDiscord", "Discord is still updating", options.notify)
+        raise RuntimeError("Discord update did not finish in time")
+    protected_versions = sanitize_shipit_request(options.discord_data, dry_run=options.dry_run)
+
+    was_running = discord_running(options.discord_data)
+    if was_running and options.restart and not options.dry_run:
+        quit_discord(options.discord_data)
+
+    try:
+        previous_version = downgrade_version_dir(
+            options.discord_data,
+            dry_run=options.dry_run,
+            protected_paths=protected_versions,
+        )
+        core_dirs = discord_core_dirs(options.discord_data, version_dirs=[previous_version])
+        LOG.info("Downgraded Discord version: %s", previous_version.name)
+        LOG.info("Discord cores found: %d", len(core_dirs))
+
+        if options.download:
+            download_asar(options.bd_asar, force=options.force_download, dry_run=options.dry_run)
+        changed = 0
+        for core_dir in core_dirs:
+            if patch_core(core_dir, dry_run=options.dry_run):
+                changed += 1
+        LOG.info("Discord cores patched: %d", changed)
+    finally:
+        if was_running and options.restart and options.reopen and not options.dry_run:
+            open_discord(options.discord_data)
+
+    notify("BetterDiscord", "Downgrade complete", options.notify)
+
+
+def downgrade_version_dir(
+    discord_data: Path,
+    dry_run: bool,
+    protected_paths: Optional[set[Path]] = None,
+) -> Path:
+    versions = [
+        path
+        for path in discord_version_dirs(discord_data)
+        if path.name.startswith("app-") and has_discord_desktop_core(path)
+    ]
+    if len(versions) < 2:
+        raise FileNotFoundError(
+            f"Need at least two cached Discord app versions to downgrade; found {len(versions)}."
+        )
+
+    current_version = versions[-1]
+    previous_version = versions[-2]
+    protected_paths = protected_paths or set()
+    resolved_protected_paths = {path.resolve(strict=False) for path in protected_paths}
+    current_resolved = current_version.resolve(strict=False)
+    if current_version in protected_paths or current_resolved in resolved_protected_paths:
+        raise RuntimeError(f"Newest Discord version is still owned by the updater: {current_version}")
+
+    LOG.info("Current Discord version: %s", current_version.name)
+    LOG.info("Previous Discord version: %s", previous_version.name)
+    remove_path(current_version, dry_run)
+    return previous_version
 
 
 def unpatch_discord(discord_data: Path, restart: bool, reopen: bool, dry_run: bool) -> None:
