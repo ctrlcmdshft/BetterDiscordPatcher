@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -25,7 +25,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.1.8"
+SCRIPT_VERSION = "2.1.9"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -293,7 +293,10 @@ def main() -> int:
                 keep_versions=args.keep_versions,
                 dry_run=args.dry_run,
             )
-            install(options)
+            if args.repair:
+                repair_discord(options)
+            else:
+                install(options)
         return 0
     except Exception as error:
         LOG.error("Install failed: %s", error)
@@ -320,6 +323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uninstall", action="store_true", help="remove the installer script")
     parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
     parser.add_argument("--unpatch", action="store_true", help="remove the BetterDiscord loader from Discord")
+    parser.add_argument("--repair", action="store_true", help="rebuild missing macOS Discord core files and restore BetterDiscord")
     parser.add_argument("--cleanup-old", action="store_true", help="remove old Discord app version folders")
     parser.add_argument("--downgrade", action="store_true", help="download a prior BetterDiscord release and patch Discord")
     parser.add_argument(
@@ -386,6 +390,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bd-asar", type=Path, default=defaults["bd_asar"], help="BetterDiscord asar output path")
     parser.set_defaults(release="stable")
     args = parser.parse_args()
+    if args.repair and (args.unpatch or args.cleanup_old or args.uninstall or args.downgrade):
+        parser.error("--repair cannot be combined with --unpatch, --cleanup-old, --uninstall, or --downgrade")
     if args.bd_previous < 1:
         parser.error("--bd-previous must be 1 or greater")
     if args.list_bd_releases is not None and args.list_bd_releases < 1:
@@ -923,6 +929,63 @@ def unpatch_discord(discord_data: Path, restart: bool, reopen: bool, dry_run: bo
             open_discord(discord_data)
 
 
+def repair_discord(options: Options) -> None:
+    if platform.system() != "Darwin":
+        raise RuntimeError("--repair currently supports the macOS Discord updater only")
+    if release_name_for_discord_data(options.discord_data) == "custom":
+        raise RuntimeError("--repair requires a standard Discord release data folder")
+    release = discord_release_for_data(options.discord_data)
+    build_info = release.app_path / "Contents/Resources/build_info.json"
+    version = json.loads(build_info.read_text(encoding="utf-8"))["version"]
+    version_dir = options.discord_data / f"app-{version}"
+    legacy_dir = options.discord_data / version
+    if has_discord_desktop_core(version_dir) or has_discord_desktop_core(legacy_dir):
+        LOG.info("Discord %s already has its core files; restoring BetterDiscord only.", version)
+    else:
+        database = options.discord_data / "installer.db"
+        if not database.is_file():
+            raise FileNotFoundError("No Discord installer.db to repair; open or reinstall Discord first")
+        if options.dry_run:
+            LOG.info("[dry-run] Quit %s, back up %s, and reopen it to rebuild missing core files.", release.name, database)
+            LOG.info("[dry-run] Restore BetterDiscord after the rebuild, without old-version cleanup.")
+            return
+
+        subprocess.run(["osascript", "-e", f'quit app "{escape_osa(release.app_name)}"'], check=True)
+        process_pattern = re.escape(str(release.app_path / "Contents/MacOS/Discord"))
+        deadline = time.monotonic() + 15
+        while subprocess.run(["pgrep", "-f", process_pattern], capture_output=True).returncode == 0:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Discord did not quit; updater database was left untouched")
+            time.sleep(0.25)
+        backup = Path(tempfile.mkdtemp(prefix="core-repair-backup-", dir=options.discord_data))
+        for suffix in ("", "-wal", "-shm"):
+            source = database.with_name(database.name + suffix)
+            if source.exists():
+                shutil.move(str(source), str(backup / source.name))
+        LOG.info("Updater database backup: %s", backup)
+        open_discord(options.discord_data)
+        deadline = time.monotonic() + 180
+        while not (
+            has_discord_desktop_core(version_dir)
+            and (find_core_dir(version_dir) / "index.js").is_file()
+        ):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Discord has not rebuilt its core files yet. Backup: {backup}. "
+                    "Let Discord finish updating, then rerun --repair."
+                )
+            time.sleep(2)
+        LOG.info("Discord core files rebuilt.")
+
+    install(replace(
+        options,
+        restart=True,
+        cleanup_before_install=False,
+        download=not options.bd_asar.is_file(),
+        bd_release="latest",
+    ))
+
+
 def install(options: Options) -> None:
     LOG.info("BetterDiscord installer script v%s", SCRIPT_VERSION)
     LOG.info("Release: %s", options.release)
@@ -964,6 +1027,8 @@ def install(options: Options) -> None:
             f"{error}\n"
             "Discord's local desktop-core modules are missing. Reinstall or reopen Discord once "
             "without cleanup so its updater can rebuild the app version folder."
+            + (" On macOS, run betterdiscord --repair to rebuild missing core files."
+               if platform.system() == "Darwin" else "")
         ) from error
     LOG.info("Latest Discord version: %s", version_dir.name)
     LOG.info("Discord cores found: %d", len(core_dirs))

@@ -36,6 +36,8 @@ betterdiscord --ptb
 betterdiscord --canary
 betterdiscord --all
 betterdiscord --dry-run
+betterdiscord --repair --dry-run
+betterdiscord --repair
 betterdiscord --edit-config
 betterdiscord --format-config
 betterdiscord --cleanup-old --dry-run
@@ -123,6 +125,23 @@ Use `betterdiscord --update` to refresh the installed script from GitHub.
 | `keep_open` | Patch without quitting Discord first. |
 | `reopen` | Reopen Discord only if it was running before patching. |
 | `notify` | Show macOS notifications. |
+
+## Repair
+
+On macOS, if Discord reports `Cannot find module 'discord_desktop_core'`, run:
+
+```sh
+betterdiscord --repair --dry-run
+betterdiscord --repair
+```
+
+When the current Discord core files are missing, repair quits Discord, moves its
+updater database into a `core-repair-backup-*` folder inside the Discord data
+folder, and reopens Discord to download the missing files. It then restores the
+BetterDiscord loader, keeping your existing BetterDiscord version when available.
+Your settings, plugins, and themes are preserved. Internet access is required to
+rebuild missing files. Repair skips old-version cleanup and currently supports
+macOS only. If core files already exist, it only restores the loader.
 
 ## Cleanup
 
