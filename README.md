@@ -116,6 +116,11 @@ betterdiscord --check-update
 The script also warns during normal runs when a newer version is available.
 Interactive runs can offer to update immediately and then continue the original command.
 Use `betterdiscord --update` to refresh the installed script from GitHub.
+The update command checks the installed version first and prints
+`You are up to date` when no update is needed. When a newer version is available,
+it shows the old and new versions, downloads and checks the files before
+replacing the script, then confirms the installed version. Failed update checks
+return an error without changing installed files; newer local versions are kept.
 
 | Key | Meaning |
 | --- | --- |

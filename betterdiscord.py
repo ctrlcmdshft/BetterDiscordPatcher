@@ -27,7 +27,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.2.0"
+SCRIPT_VERSION = "2.2.1"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -236,8 +236,7 @@ def main() -> int:
         return 0
 
     if args.update:
-        update_script(args.update_dir.expanduser(), args.raw_base)
-        return 0
+        return 0 if update_script(args.update_dir.expanduser(), args.raw_base) else 1
 
     if args.unpatch:
         try:
@@ -435,8 +434,9 @@ def maybe_handle_script_update(raw_base: str, install_dir: Path) -> Optional[int
             SCRIPT_VERSION,
         )
         if sys.stdin.isatty() and confirm("Update now?", default=True):
-            update_script(install_dir, raw_base)
-            return rerun_current_command()
+            if update_script(install_dir, raw_base):
+                return rerun_current_command()
+            return 1
     return None
 
 
@@ -621,11 +621,42 @@ def options_dict(args: argparse.Namespace) -> dict:
     }
 
 
-def update_script(install_dir: Path, raw_base: str) -> None:
-    LOG.info("Updating installer script from %s", raw_base)
-    install_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("betterdiscord.py", "README.md", "install.sh", "install.ps1"):
-        download_file(f"{raw_base.rstrip('/')}/{filename}", install_dir / filename)
+def update_script(install_dir: Path, raw_base: str) -> bool:
+    LOG.info("Checking for patcher updates...")
+    script_path = install_dir / "betterdiscord.py"
+    installed_version = None
+    if script_path.is_file():
+        match = re.search(r'^SCRIPT_VERSION = "([^"]+)"$', script_path.read_text(encoding="utf-8"), re.MULTILINE)
+        if match:
+            installed_version = match.group(1)
+    latest_version = latest_script_version(raw_base)
+    if not latest_version:
+        LOG.error("Could not check for updates. Installed files were left unchanged; try again later.")
+        return False
+    if installed_version and version_tuple(installed_version) >= version_tuple(latest_version):
+        if version_tuple(installed_version) == version_tuple(latest_version):
+            LOG.info("You are up to date: %s", installed_version)
+        else:
+            LOG.info("Installed version %s is newer than GitHub version %s; keeping it.", installed_version, latest_version)
+        return True
+    LOG.info("Update available: %s -> %s", installed_version or "not installed", latest_version)
+    # Download and compile everything before replacing the installed script.
+    with tempfile.TemporaryDirectory(prefix="betterdiscord-update-") as staging:
+        staged_dir = Path(staging)
+        try:
+            for filename in ("betterdiscord.py", "README.md", "install.sh", "install.ps1"):
+                download_file(f"{raw_base.rstrip('/')}/{filename}", staged_dir / filename)
+            match = re.search(r'^SCRIPT_VERSION = "([^"]+)"$', (staged_dir / "betterdiscord.py").read_text(encoding="utf-8"), re.MULTILINE)
+            if not match or version_tuple(match.group(1)) < version_tuple(latest_version):
+                raise RuntimeError("Downloaded script version does not match the update check")
+            latest_version = match.group(1)
+            subprocess.run([sys.executable, "-m", "py_compile", str(staged_dir / "betterdiscord.py")], check=True)
+        except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+            LOG.error("Update failed before installation: %s. Installed files were left unchanged.", error)
+            return False
+        install_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("README.md", "install.sh", "install.ps1", "betterdiscord.py"):
+            atomic_write(install_dir / filename, (staged_dir / filename).read_bytes())
     (install_dir / "betterdiscord").write_text(
         '#!/bin/zsh\nDIR="${0:A:h}"\npython3 "$DIR/betterdiscord.py" "$@"\n',
         encoding="utf-8",
@@ -637,8 +668,8 @@ def update_script(install_dir: Path, raw_base: str) -> None:
             f'@echo off\r\npython "{install_dir / "betterdiscord.py"}" %*\r\n',
             encoding="utf-8",
         )
-    subprocess.run([sys.executable, "-m", "py_compile", str(install_dir / "betterdiscord.py")], check=True)
-    LOG.info("Updated installer script: %s", install_dir)
+    LOG.info("Updated patcher: %s -> %s", installed_version or "not installed", latest_version)
+    return True
 
 
 def download_file(url: str, destination: Path) -> None:
