@@ -28,7 +28,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.3.0"
+SCRIPT_VERSION = "2.3.1"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -1031,8 +1031,15 @@ def fetch_discord_app(version: str, directory: Path) -> Path:
     image = directory / "Discord.dmg"
     url = f"https://dl.discordapp.net/apps/osx/{version}/Discord.dmg"
     LOG.info("Downloading Discord %s from Discord's servers...", version)
-    with urllib.request.urlopen(url, timeout=60) as response, image.open("wb") as file:
+    request = urllib.request.Request(url, headers={
+        "User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}",
+        "Accept": "application/octet-stream",
+    })
+    with urllib.request.urlopen(request, timeout=60) as response, image.open("wb") as file:
         shutil.copyfileobj(response, file)
+        expected_size = response.headers.get("Content-Length")
+    if expected_size is not None and image.stat().st_size != int(expected_size):
+        raise RuntimeError("Discord installer download was incomplete; current app was left unchanged")
     mount = directory / "mount"
     mount.mkdir()
     subprocess.run(["hdiutil", "attach", str(image), "-readonly", "-nobrowse", "-mountpoint", str(mount)], check=True, capture_output=True)

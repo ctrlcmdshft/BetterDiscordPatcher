@@ -123,12 +123,16 @@ class DiscordTests(unittest.TestCase):
         def run(command, **kwargs):
             if command[:2] == ["hdiutil", "attach"]:
                 shutil.copytree(self.app, directory / "mount/Discord.app")
-        with patch("betterdiscord.urllib.request.urlopen", return_value=io.BytesIO(b"image")), patch(
+        response = io.BytesIO(b"image")
+        response.headers = {"Content-Length": "5"}
+        with patch("betterdiscord.urllib.request.urlopen", return_value=response) as download, patch(
             "betterdiscord.subprocess.run", side_effect=run
         ) as command:
             with self.assertRaisesRegex(RuntimeError, "does not match"):
                 FETCH_DISCORD_APP("0.0.413", directory)
             self.assertEqual(command.call_args.args[0][:2], ["hdiutil", "detach"])
+            request = download.call_args.args[0]
+            self.assertEqual(request.get_header("User-agent"), f"{bd.APP_NAME}/{bd.SCRIPT_VERSION}")
 
     def test_bad_signature_is_rejected_before_app_replacement(self):
         directory = self.root / "download"
@@ -138,7 +142,9 @@ class DiscordTests(unittest.TestCase):
                 shutil.copytree(self.app, directory / "mount/Discord.app")
             if command[0] == "codesign":
                 raise subprocess.CalledProcessError(1, command)
-        with patch("betterdiscord.urllib.request.urlopen", return_value=io.BytesIO(b"image")), patch(
+        response = io.BytesIO(b"image")
+        response.headers = {"Content-Length": "5"}
+        with patch("betterdiscord.urllib.request.urlopen", return_value=response), patch(
             "betterdiscord.subprocess.run", side_effect=run
         ):
             with self.assertRaises(subprocess.CalledProcessError):
