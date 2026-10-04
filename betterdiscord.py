@@ -462,6 +462,7 @@ def report_script_update_status(raw_base: str) -> bool:
 
 def latest_script_version(raw_base: str) -> Optional[str]:
     try:
+        raw_base = resolved_update_base(raw_base)
         request = urllib.request.Request(
             f"{raw_base.rstrip('/')}/betterdiscord.py?update_check={time.time_ns()}",
             headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}"},
@@ -477,6 +478,20 @@ def latest_script_version(raw_base: str) -> Optional[str]:
         LOG.debug("Could not find SCRIPT_VERSION in remote script.")
         return None
     return match.group(1)
+
+
+def resolved_update_base(raw_base: str) -> str:
+    if raw_base.rstrip("/") != RAW_BASE:
+        return raw_base
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{REPO}/commits/{BRANCH}",
+        headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}", "Accept": "application/vnd.github+json"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        commit = json.loads(response.read())["sha"]
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise RuntimeError("Invalid update commit returned by GitHub")
+    return f"https://raw.githubusercontent.com/{REPO}/{commit}"
 
 
 def version_tuple(value: str) -> tuple[int, ...]:
@@ -623,6 +638,11 @@ def options_dict(args: argparse.Namespace) -> dict:
 
 def update_script(install_dir: Path, raw_base: str) -> bool:
     LOG.info("Checking for patcher updates...")
+    try:
+        raw_base = resolved_update_base(raw_base)
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
+        LOG.error("Could not check for updates: %s. Installed files were left unchanged.", error)
+        return False
     script_path = install_dir / "betterdiscord.py"
     installed_version = None
     if script_path.is_file():
