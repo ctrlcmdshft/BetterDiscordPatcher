@@ -463,7 +463,7 @@ def report_script_update_status(raw_base: str) -> bool:
 def latest_script_version(raw_base: str) -> Optional[str]:
     try:
         request = urllib.request.Request(
-            f"{raw_base.rstrip('/')}/betterdiscord.py",
+            f"{raw_base.rstrip('/')}/betterdiscord.py?update_check={time.time_ns()}",
             headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -645,7 +645,7 @@ def update_script(install_dir: Path, raw_base: str) -> bool:
         staged_dir = Path(staging)
         try:
             for filename in ("betterdiscord.py", "README.md", "install.sh", "install.ps1"):
-                download_file(f"{raw_base.rstrip('/')}/{filename}", staged_dir / filename)
+                download_file(f"{raw_base.rstrip('/')}/{filename}?update_check={time.time_ns()}", staged_dir / filename)
             match = re.search(r'^SCRIPT_VERSION = "([^"]+)"$', (staged_dir / "betterdiscord.py").read_text(encoding="utf-8"), re.MULTILINE)
             if not match or version_tuple(match.group(1)) < version_tuple(latest_version):
                 raise RuntimeError("Downloaded script version does not match the update check")
