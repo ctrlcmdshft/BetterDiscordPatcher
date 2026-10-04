@@ -32,6 +32,9 @@ creates `betterdiscord.cmd`, and adds that directory to the user `PATH`.
 betterdiscord
 betterdiscord --version
 betterdiscord --doctor
+betterdiscord --check-errors
+betterdiscord --no-download --verify-startup
+betterdiscord --discord-downgrade 0.0.413 --dry-run
 betterdiscord --rollback --dry-run
 betterdiscord --rollback
 betterdiscord --check-update
@@ -206,6 +209,51 @@ betterdiscord --downgrade --bd-previous 3
 betterdiscord --bd-release previous:3
 betterdiscord --bd-release v1.14.0
 ```
+
+## Discord App Downgrade
+
+Discord app downgrade is separate from `--downgrade`, which changes BetterDiscord.
+On macOS Stable, download an explicit older version directly from Discord:
+
+```sh
+betterdiscord --discord-downgrade 0.0.413 --dry-run
+betterdiscord --discord-downgrade 0.0.413 --verify-startup
+```
+
+No saved older app is required. The command downloads the official DMG, checks
+the requested app version and code signature, and replaces the app only after
+the download succeeds. It resets the updater database so Discord rebuilds its
+matching modules. It preserves settings, plugins, themes, and the BetterDiscord
+archive. The previous app and updater database are kept only temporarily during
+replacement and are removed after success; replacement failures restore them.
+Downloaded installers are removed too.
+
+The requested version must still be available on Discord's servers. This does
+not pin or block updates: Discord may update itself again or require a newer
+version when launched. New core modules may need BetterDiscord patched again
+after Discord finishes rebuilding them (`betterdiscord --no-download`).
+Windows, PTB, and Canary app downgrades are not supported by this command.
+
+## Startup Errors
+
+```sh
+betterdiscord --check-errors
+betterdiscord --no-download --verify-startup
+betterdiscord --downgrade --verify-startup --startup-timeout 60
+```
+
+`--check-errors` reads a bounded tail of existing Discord logs for recognized
+startup errors, including missing modules, uncaught exceptions, and updater
+failures. The renderer check starts at its latest launch marker when available.
+Old updater errors can still appear in this retrospective check.
+
+`--verify-startup` opens Discord after installing, repairing, rolling back, or
+downgrading, and checks only new log entries for 30 seconds by default. It also
+checks that Discord remains running. Errors return a nonzero status and are
+reported without automatically downgrading or changing plugins. This is a
+one-time check, not background monitoring or a guarantee that every UI feature
+and plugin works. Use `--startup-timeout` for 1 to 300 seconds. The patcher's own
+`--update` does not launch Discord or run startup verification.
 
 ## Uninstall
 
