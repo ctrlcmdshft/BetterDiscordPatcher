@@ -1,0 +1,16 @@
+{
+  "plugins": [
+    {
+      "filename": "DoNotTrack.plugin.js",
+      "url": "https://raw.githubusercontent.com/zerebos/BetterDiscordAddons/master/Plugins/DoNotTrack/DoNotTrack.plugin.js"
+    },
+    {
+      "filename": "0BDFDB.plugin.js",
+      "url": "https://mwittrien.github.io/BetterDiscordAddons/Library/0BDFDB.plugin.js"
+    },
+    {
+      "filename": "CharCounter.plugin.js",
+      "url": "https://mwittrien.github.io/BetterDiscordAddons/Plugins/CharCounter/CharCounter.plugin.js"
+    }
+  ]
+}

@@ -27,7 +27,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.3.2"
+SCRIPT_VERSION = "2.4.0"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -295,7 +295,10 @@ def main() -> int:
                 dry_run=args.dry_run,
             )
             log_positions = startup_log_positions(options.discord_data) if args.verify_startup else None
-            if args.check_errors:
+            if args.install_plugins:
+                install_plugins(options, args.install_plugins,
+                                args.plugins_dir.expanduser() if args.plugins_dir else options.bd_asar.parent.parent / "plugins")
+            elif args.check_errors:
                 if not check_discord_errors(options.discord_data):
                     return 1
             elif args.doctor:
@@ -343,6 +346,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--doctor", action="store_true", help="check Discord and BetterDiscord without changing files")
     parser.add_argument("--rollback", action="store_true", help="restore files from the latest installation backup")
     parser.add_argument("--check-errors", action="store_true", help="check the latest logged Discord session for startup errors")
+    parser.add_argument("--install-plugins", metavar="MANIFEST", help="install plugins from a JSON file, HTTPS URL, or GitHub Gist")
+    parser.add_argument("--plugins-dir", type=Path, help="override the BetterDiscord plugins folder")
     parser.add_argument("--verify-startup", action="store_true", help="open Discord after the action and monitor new startup errors")
     parser.add_argument("--startup-timeout", type=int, default=30, metavar="SECONDS", help="startup monitoring window; default 30 seconds")
     parser.add_argument("--cleanup-old", action="store_true", help="remove old Discord app version folders")
@@ -412,9 +417,11 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(release="stable")
     args = parser.parse_args()
     actions = (args.repair, args.doctor, args.rollback, args.unpatch, args.cleanup_old, args.uninstall,
-               args.downgrade, args.check_errors)
+               args.downgrade, args.check_errors, args.install_plugins)
     if sum(bool(value) for value in actions) > 1:
         parser.error("choose only one action (install, repair, rollback, downgrade, backup, diagnostics, cleanup, or uninstall)")
+    if args.install_plugins and args.release == "all":
+        parser.error("plugins are shared between Discord releases; select one release instead of --all")
     if not 1 <= args.startup_timeout <= 300:
         parser.error("--startup-timeout must be between 1 and 300 seconds")
     if args.verify_startup and (args.keep_open or not args.reopen or args.update or args.doctor or args.check_errors or args.unpatch or args.cleanup_old or args.uninstall or args.check_update or args.init_config or args.edit_config or args.format_config or args.show_config or args.list_bd_releases is not None):
@@ -437,7 +444,7 @@ def parse_args() -> argparse.Namespace:
 def should_check_for_script_update(args: argparse.Namespace) -> bool:
     if os.environ.get(SKIP_UPDATE_PROMPT_ENV) == "1":
         return False
-    if args.update or args.init_config or args.format_config or args.edit_config or args.check_update or args.doctor or args.rollback or args.check_errors:
+    if args.update or args.init_config or args.format_config or args.edit_config or args.check_update or args.doctor or args.rollback or args.check_errors or args.install_plugins:
         return False
     return True
 
@@ -1133,6 +1140,154 @@ def repair_discord(options: Options) -> None:
         download=not options.bd_asar.is_file(),
         bd_release="latest",
     ))
+
+
+def fetch_plugin_resource(url: str, limit: int) -> bytes:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Plugin and manifest download URLs must use HTTPS without embedded credentials")
+    request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if urllib.parse.urlparse(response.geturl()).scheme != "https":
+            raise ValueError("Plugin download redirected to an insecure URL")
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("Plugin resource exceeds the allowed download size")
+    return data
+
+
+def load_plugin_manifest(source: str) -> list[dict]:
+    parsed = urllib.parse.urlparse(source)
+    if parsed.hostname == "gist.github.com":
+        parts = parsed.path.strip("/").split("/")
+        gist_id = parts[1] if len(parts) >= 2 else parts[0]
+        if not re.fullmatch(r"[0-9a-fA-F]{20,40}", gist_id):
+            raise ValueError("Invalid GitHub Gist URL")
+        gist = json.loads(fetch_plugin_resource(f"https://api.github.com/gists/{gist_id}", 1024 * 1024))
+        files = gist.get("files", {})
+        if "plugins.json" in files:
+            source = files["plugins.json"]["raw_url"]
+        else:
+            json_files = [file for name, file in files.items() if name.endswith(".json")]
+            if len(json_files) != 1:
+                raise ValueError("Gist must contain plugins.json or exactly one JSON file; otherwise use its raw file URL")
+            source = json_files[0]["raw_url"]
+        parsed = urllib.parse.urlparse(source)
+    if parsed.scheme and not re.match(r"^[A-Za-z]:[\\/]", source):
+        raw = fetch_plugin_resource(source, 1024 * 1024)
+    else:
+        with Path(source).expanduser().open("rb") as file:
+            raw = file.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError("Plugin manifest exceeds 1 MB")
+    manifest = json.loads(raw)
+    entries = manifest.get("plugins") if isinstance(manifest, dict) else None
+    if not isinstance(entries, list) or not 1 <= len(entries) <= 50:
+        raise ValueError("Manifest must contain a plugins array with 1 to 50 entries")
+    filenames = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Each plugin entry must be an object with filename and url")
+        filename = entry.get("filename", "")
+        if not isinstance(filename, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.plugin\.js", filename):
+            raise ValueError("Plugin filenames must be simple names ending in .plugin.js")
+        if filename.lower() in filenames:
+            raise ValueError(f"Duplicate plugin filename: {filename}")
+        filenames.add(filename.lower())
+        url = entry.get("url")
+        parsed_url = urllib.parse.urlparse(url) if isinstance(url, str) else None
+        if parsed_url is None or parsed_url.scheme != "https" or not parsed_url.hostname or parsed_url.username or parsed_url.password:
+            raise ValueError(f"Plugin {filename} requires a direct HTTPS download URL")
+        digest = entry.get("sha256")
+        if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest)):
+            raise ValueError(f"Invalid SHA256 checksum for {filename}")
+    return entries
+
+
+def plugin_metadata(data: bytes) -> dict[str, str]:
+    content = data.decode("utf-8-sig")
+    match = re.match(r"\s*/\*\*(.*?)\*/", content, re.DOTALL)
+    if not match:
+        raise ValueError("Plugin must begin with a BetterDiscord metadata header, not an HTML page")
+    metadata = dict(re.findall(r"^\s*\*?\s*@([A-Za-z]+)\s+([^\r\n]+)", match.group(1), re.MULTILINE))
+    if not all(metadata.get(field, "").strip() for field in ("name", "author", "version", "description")):
+        raise ValueError("Plugin metadata must include name, author, version, and description")
+    return metadata
+
+
+def install_plugins(options: Options, source: str, directory: Path) -> None:
+    entries = load_plugin_manifest(source)
+    LOG.info("Plugin manifest: %s", source)
+    LOG.info("Plugins folder: %s", directory)
+    if options.dry_run:
+        for entry in entries:
+            LOG.info("[dry-run] Fetch and validate %s from %s", entry["filename"], entry["url"])
+        return
+    downloads = {}
+    names = set()
+    for entry in entries:
+        data = fetch_plugin_resource(entry["url"], 5 * 1024 * 1024)
+        if sum(len(value) for value in downloads.values()) + len(data) > 50 * 1024 * 1024:
+            raise ValueError("Plugin batch exceeds 50 MB")
+        metadata = plugin_metadata(data)
+        name = metadata["name"].strip().lower()
+        if name in names:
+            raise ValueError(f"Duplicate plugin name in manifest: {metadata['name']}")
+        names.add(name)
+        if entry.get("sha256") and hashlib.sha256(data).hexdigest() != entry["sha256"].lower():
+            raise ValueError(f"Plugin checksum mismatch: {entry['filename']}")
+        LOG.info("Validated: %s (version %s)", metadata["name"].strip(), metadata["version"].strip())
+        downloads[entry["filename"]] = data
+    for installed in directory.glob("*.plugin.js"):
+        if installed.name in downloads:
+            continue
+        try:
+            installed_name = plugin_metadata(installed.read_bytes())["name"].strip().lower()
+        except (ValueError, UnicodeError):
+            continue
+        if installed_name in names:
+            raise ValueError(f"Plugin is already installed under a different filename: {installed.name}")
+    changes = {name: data for name, data in downloads.items()
+               if not (directory / name).is_file() or (directory / name).read_bytes() != data}
+    if not changes:
+        LOG.info("All listed plugin files are already up to date.")
+        return
+    if not options.restart and discord_running(options.discord_data):
+        raise RuntimeError("Plugin installation requires quitting Discord; rerun with --restart")
+    was_running = discord_running(options.discord_data)
+    originals = {}
+    changed_files = []
+    try:
+        if was_running:
+            quit_discord(options.discord_data)
+            if discord_running(options.discord_data):
+                raise RuntimeError("Discord did not quit; plugin files were left unchanged")
+        directory.mkdir(parents=True, exist_ok=True)
+        originals = {name: (directory / name).read_bytes() if (directory / name).exists() else None for name in changes}
+        backup_root = directory.parent / ".betterdiscord-patcher/plugin-backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup = Path(tempfile.mkdtemp(prefix=f"{time.time_ns()}-", dir=backup_root))
+        for name, data in originals.items():
+            if data is not None:
+                atomic_write(backup / name, data)
+        atomic_write(backup / "manifest.json", json.dumps({"plugins_dir": str(directory.resolve()), "files": list(changes)}).encode())
+        LOG.info("Plugin backup: %s", backup)
+        for name, data in changes.items():
+            atomic_write(directory / name, data)
+            changed_files.append(name)
+            LOG.info("Installed: %s", name)
+    except Exception:
+        for name in reversed(changed_files):
+            data = originals[name]
+            if data is None:
+                (directory / name).unlink(missing_ok=True)
+            else:
+                atomic_write(directory / name, data)
+        raise
+    finally:
+        if was_running and options.reopen:
+            open_discord(options.discord_data)
+    LOG.info("Installed %d plugin files. New plugins can be enabled in BetterDiscord settings.", len(changes))
 
 
 def atomic_write(path: Path, data: bytes) -> None:

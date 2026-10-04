@@ -32,6 +32,8 @@ creates `betterdiscord.cmd`, and adds that directory to the user `PATH`.
 betterdiscord
 betterdiscord --version
 betterdiscord --doctor
+betterdiscord --install-plugins plugins.json --dry-run
+betterdiscord --install-plugins plugins.json
 betterdiscord --check-errors
 betterdiscord --no-download --verify-startup
 betterdiscord --rollback --dry-run
@@ -208,6 +210,51 @@ betterdiscord --downgrade --bd-previous 3
 betterdiscord --bd-release previous:3
 betterdiscord --bd-release v1.14.0
 ```
+
+## Plugin Lists
+
+Keep your preferred plugins in a GitHub Gist named `plugins.json`, or in a local
+JSON file. Use direct plugin download links rather than plugin listing pages:
+
+```json
+{
+  "plugins": [
+    {
+      "filename": "DoNotTrack.plugin.js",
+      "url": "https://raw.githubusercontent.com/zerebos/BetterDiscordAddons/master/Plugins/DoNotTrack/DoNotTrack.plugin.js"
+    }
+  ]
+}
+```
+
+```sh
+betterdiscord --install-plugins "https://gist.github.com/YOUR_USER/GIST_ID" --dry-run
+betterdiscord --install-plugins "https://gist.github.com/YOUR_USER/GIST_ID"
+betterdiscord --install-plugins plugins.json
+```
+
+Normal Gist page links and raw HTTPS file links are both supported. For Gists
+with multiple JSON files, name the manifest `plugins.json` or use its raw URL.
+An example with library dependencies is provided in `plugins.example.json`.
+List required library plugins explicitly; dependencies are not downloaded
+automatically. Each entry can optionally include a `sha256` checksum to require
+specific plugin contents.
+
+The command downloads and checks all listed files before changing any plugins.
+It validates metadata and optional checksums, skips identical files, backs up
+changed plugin files, and restores changes if installation fails. Backups are
+saved under `.betterdiscord-patcher/plugin-backups` beside the plugins folder
+for manual recovery; `--rollback` covers the BetterDiscord loader/archive, not
+these plugin files. Unlisted plugins and plugin settings are preserved. A
+dry-run reads the manifest and previews its links without downloading plugins.
+
+Discord is quit during replacement and reopened if it was running, unless
+`--no-reopen` is used. New plugins are installed but not automatically enabled.
+Metadata checks do not guarantee compatibility or inspect all plugin behavior.
+Use links from plugin authors you intend to install. The folder defaults to
+`BetterDiscord/plugins` next to the selected BetterDiscord data folder; override
+it with `--plugins-dir PATH`. Plugins are shared across Discord releases, so
+`--all` is not needed. `--verify-startup` can also check the subsequent launch.
 
 ## Startup Errors
 
