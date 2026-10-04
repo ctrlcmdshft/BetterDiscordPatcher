@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-from contextlib import ExitStack
 import hashlib
 import json
 import logging
@@ -28,7 +27,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.3.1"
+SCRIPT_VERSION = "2.3.2"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -296,9 +295,7 @@ def main() -> int:
                 dry_run=args.dry_run,
             )
             log_positions = startup_log_positions(options.discord_data) if args.verify_startup else None
-            if args.discord_downgrade:
-                downgrade_discord(options, args.discord_downgrade)
-            elif args.check_errors:
+            if args.check_errors:
                 if not check_discord_errors(options.discord_data):
                     return 1
             elif args.doctor:
@@ -317,7 +314,7 @@ def main() -> int:
                     return 1
         return 0
     except Exception as error:
-        action = "Discord downgrade" if args.discord_downgrade else "Rollback" if args.rollback else "Diagnostics" if args.doctor or args.check_errors else "Install"
+        action = "Rollback" if args.rollback else "Diagnostics" if args.doctor or args.check_errors else "Install"
         LOG.error("%s failed: %s", action, error)
         return 1
 
@@ -345,7 +342,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repair", action="store_true", help="rebuild missing macOS Discord core files and restore BetterDiscord")
     parser.add_argument("--doctor", action="store_true", help="check Discord and BetterDiscord without changing files")
     parser.add_argument("--rollback", action="store_true", help="restore files from the latest installation backup")
-    parser.add_argument("--discord-downgrade", metavar="VERSION", help="download and install an older macOS Discord Stable app version")
     parser.add_argument("--check-errors", action="store_true", help="check the latest logged Discord session for startup errors")
     parser.add_argument("--verify-startup", action="store_true", help="open Discord after the action and monitor new startup errors")
     parser.add_argument("--startup-timeout", type=int, default=30, metavar="SECONDS", help="startup monitoring window; default 30 seconds")
@@ -416,7 +412,7 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(release="stable")
     args = parser.parse_args()
     actions = (args.repair, args.doctor, args.rollback, args.unpatch, args.cleanup_old, args.uninstall,
-               args.downgrade, args.discord_downgrade, args.check_errors)
+               args.downgrade, args.check_errors)
     if sum(bool(value) for value in actions) > 1:
         parser.error("choose only one action (install, repair, rollback, downgrade, backup, diagnostics, cleanup, or uninstall)")
     if not 1 <= args.startup_timeout <= 300:
@@ -441,7 +437,7 @@ def parse_args() -> argparse.Namespace:
 def should_check_for_script_update(args: argparse.Namespace) -> bool:
     if os.environ.get(SKIP_UPDATE_PROMPT_ENV) == "1":
         return False
-    if args.update or args.init_config or args.format_config or args.edit_config or args.check_update or args.doctor or args.rollback or args.discord_downgrade or args.check_errors:
+    if args.update or args.init_config or args.format_config or args.edit_config or args.check_update or args.doctor or args.rollback or args.check_errors:
         return False
     return True
 
@@ -1010,92 +1006,6 @@ def unpatch_discord(discord_data: Path, restart: bool, reopen: bool, dry_run: bo
     finally:
         if was_running and restart and reopen and not dry_run:
             open_discord(discord_data)
-
-
-def discord_app_version(app: Path) -> str:
-    version = json.loads((app / "Contents/Resources/build_info.json").read_text(encoding="utf-8"))["version"]
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        raise RuntimeError("Invalid Discord app version")
-    if not (app / "Contents/MacOS/Discord").is_file():
-        raise RuntimeError("Discord app executable is missing")
-    return version
-
-
-def require_mac_discord(options: Options) -> DiscordRelease:
-    if platform.system() != "Darwin" or release_name_for_discord_data(options.discord_data) != "stable":
-        raise RuntimeError("Discord app downloads currently support macOS Stable only")
-    return discord_release_for_data(options.discord_data)
-
-
-def fetch_discord_app(version: str, directory: Path) -> Path:
-    image = directory / "Discord.dmg"
-    url = f"https://dl.discordapp.net/apps/osx/{version}/Discord.dmg"
-    LOG.info("Downloading Discord %s from Discord's servers...", version)
-    request = urllib.request.Request(url, headers={
-        "User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}",
-        "Accept": "application/octet-stream",
-    })
-    with urllib.request.urlopen(request, timeout=60) as response, image.open("wb") as file:
-        shutil.copyfileobj(response, file)
-        expected_size = response.headers.get("Content-Length")
-    if expected_size is not None and image.stat().st_size != int(expected_size):
-        raise RuntimeError("Discord installer download was incomplete; current app was left unchanged")
-    mount = directory / "mount"
-    mount.mkdir()
-    subprocess.run(["hdiutil", "attach", str(image), "-readonly", "-nobrowse", "-mountpoint", str(mount)], check=True, capture_output=True)
-    try:
-        source = mount / "Discord.app"
-        if discord_app_version(source) != version:
-            raise RuntimeError("Downloaded Discord app version does not match the requested version")
-        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(source)], check=True, capture_output=True)
-        app = directory / "downloaded.app"
-        shutil.copytree(source, app, symlinks=True)
-        return app
-    finally:
-        subprocess.run(["hdiutil", "detach", str(mount)], check=True, capture_output=True)
-
-
-def downgrade_discord(options: Options, requested: str) -> None:
-    release = require_mac_discord(options)
-    current = discord_app_version(release.app_path)
-    if not re.fullmatch(r"\d+\.\d+\.\d+", requested) or version_tuple(requested) >= version_tuple(current):
-        raise ValueError("Specify an older Discord version, for example --discord-downgrade 0.0.413")
-    LOG.info("%sDiscord downgrade: %s -> %s", "[dry-run] " if options.dry_run else "", current, requested)
-    if options.dry_run:
-        LOG.info("[dry-run] Download the official DMG, verify the app, replace Discord, and reset its updater database. No app archive is retained.")
-        return
-    with ExitStack() as stack:
-        staging = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".discord-downgrade-", dir=release.app_path.parent)))
-        downloaded = fetch_discord_app(requested, staging)
-        data_staging = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix=".discord-updater-", dir=options.discord_data)))
-        was_running = discord_running(options.discord_data)
-        moved = []
-        old_app = staging / "original.app"
-        try:
-            if was_running:
-                quit_discord(options.discord_data)
-            if discord_running(options.discord_data) or shipit_running(options.discord_data):
-                raise RuntimeError("Discord or its updater is still running; downgrade stopped")
-            for suffix in ("", "-wal", "-shm"):
-                database = options.discord_data / ("installer.db" + suffix)
-                if database.exists():
-                    saved = data_staging / database.name
-                    os.replace(database, saved)
-                    moved.append((database, saved))
-            os.replace(release.app_path, old_app)
-            os.replace(downloaded, release.app_path)
-        except Exception:
-            if old_app.exists():
-                if release.app_path.exists():
-                    shutil.rmtree(release.app_path)
-                os.replace(old_app, release.app_path)
-            for target, saved in reversed(moved):
-                os.replace(saved, target)
-            raise
-        finally:
-            if was_running and options.reopen:
-                open_discord(options.discord_data)
-        LOG.info("Discord %s installed. Temporary old-app and download files are removed; Discord may update itself again.", requested)
 
 
 STARTUP_ERRORS = re.compile(r"cannot find module|uncaught (?:exception|error)|unhandled(?:promise)?\s*rejection|fatal(?: javascript)?[:\s]+(?:error|exception)|update failed|failed to (?:install|download|update).{0,60}(?:module|host|discord)", re.IGNORECASE)
