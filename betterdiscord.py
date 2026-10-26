@@ -27,7 +27,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.4.0"
+SCRIPT_VERSION = "2.5.0"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -37,12 +37,17 @@ WINDOWS_RELEASE_DIRS = {
     "stable": "Discord",
     "ptb": "DiscordPTB",
     "canary": "DiscordCanary",
+    "development": "DiscordDevelopment",
 }
 MAC_RELEASE_DIRS = {
     "stable": "discord",
     "ptb": "discordptb",
     "canary": "discordcanary",
+    "development": "discorddevelopment",
 }
+WATCHER_LABEL = "com.betterdiscord.patcher.heal"
+WATCHER_TASK_NAME = "BetterDiscordPatcherHeal"
+WATCHER_INTERVAL_SECONDS = 900
 RELEASE_ORDER = ("stable", "ptb", "canary")
 
 
@@ -159,9 +164,12 @@ DISCORD_RELEASES = {
     ),
 }
 
-INJECTION = """\
+# The loader always falls back to Discord's core. A missing or corrupt archive
+# used to throw from this require and stop Discord from starting at all.
+INJECTION_TEMPLATE = """\
 // BetterDiscord's Injection Script
 const path = require("path");
+const fs = require("fs");
 const electron = require("electron");
 
 let userConfig = path.join(electron.app.getPath("userData"), "..");
@@ -171,10 +179,34 @@ if (process.platform !== "win32" && process.platform !== "darwin") {
     if (process.env.HOST_XDG_CONFIG_HOME) userConfig = process.env.HOST_XDG_CONFIG_HOME;
 }
 
-require(path.join(userConfig, "BetterDiscord", "data", "betterdiscord.asar"));
+const bdCandidates = Array.from(new Set([
+    __BD_ASAR_JSON__,
+    path.join(userConfig, "BetterDiscord", "data", "betterdiscord.asar"),
+]));
+
+let loadedBetterDiscord = false;
+for (const bdPath of bdCandidates) {
+    try {
+        if (!fs.existsSync(bdPath)) {
+            continue;
+        }
+        require(bdPath);
+        loadedBetterDiscord = true;
+        break;
+    } catch (error) {
+        console.error("[BetterDiscordPatcher] Failed to load BetterDiscord from " + bdPath + ":", error);
+    }
+}
+if (!loadedBetterDiscord) {
+    console.error("[BetterDiscordPatcher] BetterDiscord archive is missing or unreadable. Discord will start without it.");
+}
 
 module.exports = require("./core.asar");
 """
+
+
+def injection_source(bd_asar: Path) -> str:
+    return INJECTION_TEMPLATE.replace("__BD_ASAR_JSON__", json.dumps(str(bd_asar.expanduser())))
 
 
 @dataclass
@@ -267,6 +299,27 @@ def main() -> int:
             return 1
         return 0
 
+    if args.install_watcher:
+        try:
+            install_watcher(
+                args.target_discord_data,
+                args.bd_asar.expanduser(),
+                args.config.expanduser(),
+                dry_run=args.dry_run,
+            )
+        except Exception as error:
+            LOG.error("Could not install the watcher: %s", error)
+            return 1
+        return 0
+
+    if args.uninstall_watcher:
+        try:
+            remove_watcher(dry_run=args.dry_run)
+        except Exception as error:
+            LOG.error("Could not remove the watcher: %s", error)
+            return 1
+        return 0
+
     if args.uninstall:
         uninstall_script(
             args.update_dir.expanduser(),
@@ -306,6 +359,9 @@ def main() -> int:
                     return 1
             elif args.rollback:
                 rollback(options)
+            elif args.heal:
+                if not heal(options):
+                    return 1
             elif args.repair:
                 repair_discord(options)
             else:
@@ -317,7 +373,16 @@ def main() -> int:
                     return 1
         return 0
     except Exception as error:
-        action = "Rollback" if args.rollback else "Diagnostics" if args.doctor or args.check_errors else "Install"
+        if args.rollback:
+            action = "Rollback"
+        elif args.heal:
+            action = "Heal"
+        elif args.repair:
+            action = "Repair"
+        elif args.doctor or args.check_errors:
+            action = "Diagnostics"
+        else:
+            action = "Install"
         LOG.error("%s failed: %s", action, error)
         return 1
 
@@ -343,6 +408,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--remove-config", action="store_true", help="also remove config with --uninstall")
     parser.add_argument("--unpatch", action="store_true", help="remove the BetterDiscord loader from Discord")
     parser.add_argument("--repair", action="store_true", help="rebuild missing macOS Discord core files and restore BetterDiscord")
+    parser.add_argument("--heal", action="store_true", help="restore a missing or invalid BetterDiscord archive and a safe loader without quitting Discord")
+    parser.add_argument("--install-watcher", action="store_true", help="re-run --heal automatically when Discord or BetterDiscord files change")
+    parser.add_argument("--uninstall-watcher", action="store_true", help="remove the automatic --heal watcher")
     parser.add_argument("--doctor", action="store_true", help="check Discord and BetterDiscord without changing files")
     parser.add_argument("--rollback", action="store_true", help="restore files from the latest installation backup")
     parser.add_argument("--check-errors", action="store_true", help="check the latest logged Discord session for startup errors")
@@ -416,15 +484,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bd-asar", type=Path, default=defaults["bd_asar"], help="BetterDiscord asar output path")
     parser.set_defaults(release="stable")
     args = parser.parse_args()
-    actions = (args.repair, args.doctor, args.rollback, args.unpatch, args.cleanup_old, args.uninstall,
-               args.downgrade, args.check_errors, args.install_plugins)
+    actions = (args.repair, args.heal, args.install_watcher, args.uninstall_watcher, args.doctor, args.rollback,
+               args.unpatch, args.cleanup_old, args.uninstall, args.downgrade, args.check_errors, args.install_plugins)
     if sum(bool(value) for value in actions) > 1:
-        parser.error("choose only one action (install, repair, rollback, downgrade, backup, diagnostics, cleanup, or uninstall)")
+        parser.error("choose only one action (install, heal, repair, rollback, downgrade, backup, diagnostics, cleanup, or uninstall)")
     if args.install_plugins and args.release == "all":
         parser.error("plugins are shared between Discord releases; select one release instead of --all")
     if not 1 <= args.startup_timeout <= 300:
         parser.error("--startup-timeout must be between 1 and 300 seconds")
-    if args.verify_startup and (args.keep_open or not args.reopen or args.update or args.doctor or args.check_errors or args.unpatch or args.cleanup_old or args.uninstall or args.check_update or args.init_config or args.edit_config or args.format_config or args.show_config or args.list_bd_releases is not None):
+    if args.verify_startup and (args.keep_open or not args.reopen or args.update or args.doctor or args.check_errors or args.unpatch or args.cleanup_old or args.uninstall or args.check_update or args.init_config or args.edit_config or args.format_config or args.show_config or args.list_bd_releases is not None or args.heal or args.install_watcher or args.uninstall_watcher):
         parser.error("--verify-startup requires an installation/repair/rollback action with --restart and --reopen")
     if args.bd_previous < 1:
         parser.error("--bd-previous must be 1 or greater")
@@ -444,7 +512,7 @@ def parse_args() -> argparse.Namespace:
 def should_check_for_script_update(args: argparse.Namespace) -> bool:
     if os.environ.get(SKIP_UPDATE_PROMPT_ENV) == "1":
         return False
-    if args.update or args.init_config or args.format_config or args.edit_config or args.check_update or args.doctor or args.rollback or args.check_errors or args.install_plugins:
+    if args.update or args.init_config or args.format_config or args.edit_config or args.check_update or args.doctor or args.rollback or args.check_errors or args.install_plugins or args.heal or args.install_watcher or args.uninstall_watcher:
         return False
     return True
 
@@ -718,13 +786,32 @@ def update_script(install_dir: Path, raw_base: str) -> bool:
     return True
 
 
+def read_body(response) -> bytes:
+    try:
+        data = response.read()
+    except Exception as error:
+        partial = getattr(error, "partial", None)
+        if partial is None:
+            raise
+        expected = getattr(error, "expected", "?")
+        raise RuntimeError(f"Download ended early ({len(partial)} of {expected} bytes)") from error
+    expected = response.headers.get("Content-Length")
+    if expected is not None:
+        try:
+            expected_length = int(expected)
+        except ValueError:
+            expected_length = None
+        if expected_length is not None and expected_length != len(data):
+            raise RuntimeError(f"Download ended early ({len(data)} of {expected_length} bytes)")
+    return data
+
+
 def download_file(url: str, destination: Path) -> None:
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
     LOG.info("Download %s", url)
-    request = urllib.request.Request(url, headers={"User-Agent": "BetterDiscordPatcher/2.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}"})
     with urllib.request.urlopen(request, timeout=30) as response:
-        temporary.write_bytes(response.read())
-    temporary.replace(destination)
+        data = read_body(response)
+    atomic_write(destination, data)
 
 
 def uninstall_script(
@@ -734,6 +821,7 @@ def uninstall_script(
     remove_config: bool,
     dry_run: bool,
 ) -> None:
+    remove_watcher(dry_run, quiet_if_missing=True)
     if not remove_config and config_path.exists():
         remove_config = confirm("Remove config too?", default=False)
 
@@ -944,6 +1032,8 @@ def cleanup_old_versions(
     if keep < 1:
         raise ValueError("--keep-versions must be 1 or greater")
 
+    protected_paths = set(protected_paths or ())
+    protected_paths.update(protected_version_dirs(discord_data))
     versions = discord_version_dirs(discord_data)
     cleanup_candidates = [
         path for path in versions if path.name.startswith("app-") and has_discord_desktop_core(path)
@@ -1058,7 +1148,11 @@ def check_discord_errors(discord_data: Path, positions: Optional[dict] = None) -
             marker = content.rfind("splashScreenPreload: signalReady")
             if marker >= 0:
                 content = content[marker:]
-        errors.extend((path.name, line[:500]) for line in content.splitlines() if STARTUP_ERRORS.search(line))
+        errors.extend(
+            (path.name, line[:500])
+            for line in content.splitlines()
+            if STARTUP_ERRORS.search(line) and "BetterDiscordPatcher" not in line
+        )
     for name, line in errors[-10:]:
         LOG.error("%s: %s", name, line)
     if positions is None:
@@ -1086,60 +1180,72 @@ def verify_discord_startup(discord_data: Path, positions: dict, timeout: int) ->
 
 
 def repair_discord(options: Options) -> None:
-    if platform.system() != "Darwin":
-        raise RuntimeError("--repair currently supports the macOS Discord updater only")
-    if release_name_for_discord_data(options.discord_data) == "custom":
-        raise RuntimeError("--repair requires a standard Discord release data folder")
-    release = discord_release_for_data(options.discord_data)
+    if platform.system() == "Darwin":
+        if release_name_for_discord_data(options.discord_data) == "custom":
+            raise RuntimeError("--repair requires a standard Discord release data folder")
+        release = discord_release_for_data(options.discord_data)
+        if release is None:
+            raise RuntimeError("--repair requires a standard Discord release data folder")
+        if not repair_macos_core(options, release):
+            return
+    elif platform.system() != "Windows":
+        raise RuntimeError("--repair supports macOS and Windows only")
+
+    valid = asar_is_valid(options.bd_asar)
+    install(replace(
+        options,
+        restart=True,
+        cleanup_before_install=False,
+        download=not valid,
+        force_download=not valid or options.force_download,
+        bd_release="latest" if not valid else options.bd_release,
+    ))
+
+
+def repair_macos_core(options: Options, release: DiscordRelease) -> bool:
     build_info = release.app_path / "Contents/Resources/build_info.json"
     version = json.loads(build_info.read_text(encoding="utf-8"))["version"]
     version_dir = options.discord_data / f"app-{version}"
     legacy_dir = options.discord_data / version
     if has_discord_desktop_core(version_dir) or has_discord_desktop_core(legacy_dir):
         LOG.info("Discord %s already has its core files; restoring BetterDiscord only.", version)
-    else:
-        database = options.discord_data / "installer.db"
-        if not database.is_file():
-            raise FileNotFoundError("No Discord installer.db to repair; open or reinstall Discord first")
-        if options.dry_run:
-            LOG.info("[dry-run] Quit %s, back up %s, and reopen it to rebuild missing core files.", release.name, database)
-            LOG.info("[dry-run] Restore BetterDiscord after the rebuild, without old-version cleanup.")
-            return
+        return True
 
-        subprocess.run(["osascript", "-e", f'quit app "{escape_osa(release.app_name)}"'], check=True)
-        process_pattern = re.escape(str(release.app_path / "Contents/MacOS/Discord"))
-        deadline = time.monotonic() + 15
-        while subprocess.run(["pgrep", "-f", process_pattern], capture_output=True).returncode == 0:
-            if time.monotonic() >= deadline:
-                raise RuntimeError("Discord did not quit; updater database was left untouched")
-            time.sleep(0.25)
-        backup = Path(tempfile.mkdtemp(prefix="core-repair-backup-", dir=options.discord_data))
-        for suffix in ("", "-wal", "-shm"):
-            source = database.with_name(database.name + suffix)
-            if source.exists():
-                shutil.move(str(source), str(backup / source.name))
-        LOG.info("Updater database backup: %s", backup)
-        open_discord(options.discord_data)
-        deadline = time.monotonic() + 180
-        while not (
-            has_discord_desktop_core(version_dir)
-            and (find_core_dir(version_dir) / "index.js").is_file()
-        ):
-            if time.monotonic() >= deadline:
-                raise RuntimeError(
-                    f"Discord has not rebuilt its core files yet. Backup: {backup}. "
-                    "Let Discord finish updating, then rerun --repair."
-                )
-            time.sleep(2)
-        LOG.info("Discord core files rebuilt.")
+    database = options.discord_data / "installer.db"
+    if not database.is_file():
+        raise FileNotFoundError("No Discord installer.db to repair; open or reinstall Discord first")
+    if options.dry_run:
+        LOG.info("[dry-run] Quit %s, back up %s, and reopen it to rebuild missing core files.", release.name, database)
+        LOG.info("[dry-run] Restore BetterDiscord after the rebuild, without old-version cleanup.")
+        return False
 
-    install(replace(
-        options,
-        restart=True,
-        cleanup_before_install=False,
-        download=not options.bd_asar.is_file(),
-        bd_release="latest",
-    ))
+    subprocess.run(["osascript", "-e", f'quit app "{escape_osa(release.app_name)}"'], check=True)
+    process_pattern = re.escape(str(release.app_path / "Contents/MacOS/Discord"))
+    deadline = time.monotonic() + 15
+    while subprocess.run(["pgrep", "-f", process_pattern], capture_output=True).returncode == 0:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Discord did not quit; updater database was left untouched")
+        time.sleep(0.25)
+    backup = Path(tempfile.mkdtemp(prefix="core-repair-backup-", dir=options.discord_data))
+    for suffix in ("", "-wal", "-shm"):
+        source = database.with_name(database.name + suffix)
+        if source.exists():
+            shutil.move(str(source), str(backup / source.name))
+    LOG.info("Updater database backup: %s", backup)
+    open_discord(options.discord_data)
+    deadline = time.monotonic() + 180
+    while not (
+        has_discord_desktop_core(version_dir)
+        and (find_core_dir(version_dir) / "index.js").is_file()
+    ):
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"Discord has not rebuilt its core files yet. Backup: {backup}. "
+                "Let Discord finish updating, then rerun --repair."
+            )
+        time.sleep(2)
+    LOG.info("Discord core files rebuilt.")
+    return True
 
 
 def fetch_plugin_resource(url: str, limit: int) -> bytes:
@@ -1294,6 +1400,7 @@ def atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
     temporary_path = Path(temporary)
+    replaced = False
     try:
         with os.fdopen(descriptor, "wb") as file:
             file.write(data)
@@ -1302,8 +1409,55 @@ def atomic_write(path: Path, data: bytes) -> None:
         if path.exists():
             shutil.copymode(path, temporary_path)
         os.replace(temporary_path, path)
+        replaced = True
+        fsync_dir(path.parent)
     finally:
-        temporary_path.unlink(missing_ok=True)
+        if not replaced:
+            temporary_path.unlink(missing_ok=True)
+
+
+def fsync_dir(directory: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        return
+    finally:
+        os.close(descriptor)
+
+
+def asar_is_valid(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+        validate_asar(path.read_bytes())
+    except (OSError, RuntimeError):
+        return False
+    return True
+
+
+def core_needs_patch(core_dir: Path, bd_asar: Path) -> bool:
+    index_js = core_dir / "index.js"
+    if not index_js.is_file():
+        return True
+    return index_js.read_text(encoding="utf-8", errors="ignore") != injection_source(bd_asar)
+
+
+def loader_status(index_js: Path, bd_asar: Path) -> str:
+    if not index_js.is_file():
+        return "missing"
+    text = index_js.read_text(encoding="utf-8", errors="ignore")
+    if text == injection_source(bd_asar):
+        return "current"
+    if "betterdiscord" in text.lower():
+        return "outdated"
+    return "unpatched"
 
 
 def validate_asar(data: bytes) -> None:
@@ -1427,21 +1581,30 @@ def doctor(options: Options) -> bool:
         versions = discord_version_dirs(options.discord_data)
         LOG.info("Version folders: %s", ", ".join(path.name for path in versions))
         if platform.system() == "Darwin":
-            info = discord_release_for_data(options.discord_data).app_path / "Contents/Resources/build_info.json"
-            version = json.loads(info.read_text(encoding="utf-8"))["version"]
-            if not any(has_discord_desktop_core(options.discord_data / name)
-                       for name in (version, f"app-{version}")):
-                LOG.error("Installed Discord %s has no local core files; older cores do not repair this version.", version)
-                healthy = False
+            release = discord_release_for_data(options.discord_data)
+            if release is None:
+                LOG.info("Discord data folder is not a known release; skipping the app version check.")
+            else:
+                info = release.app_path / "Contents/Resources/build_info.json"
+                version = json.loads(info.read_text(encoding="utf-8"))["version"]
+                if not any(has_discord_desktop_core(options.discord_data / name)
+                           for name in (version, f"app-{version}")):
+                    LOG.error("Installed Discord %s has no local core files; older cores do not repair this version.", version)
+                    healthy = False
         cores = discord_core_dirs(options.discord_data, versions)
         for core in cores:
             index = core / "index.js"
-            if not index.is_file():
+            status = loader_status(index, options.bd_asar)
+            if status == "missing":
                 LOG.error("Missing loader: %s", index)
                 healthy = False
-                continue
-            patched = "betterdiscord" in index.read_text(encoding="utf-8").lower()
-            LOG.info("Core: %s [%s]", core, "BetterDiscord patched" if patched else "unpatched")
+            elif status == "outdated":
+                LOG.error("Core: %s [outdated BetterDiscord patch can crash Discord when the archive is missing]", core)
+                healthy = False
+            elif status == "current":
+                LOG.info("Core: %s [BetterDiscord patched]", core)
+            else:
+                LOG.info("Core: %s [unpatched]", core)
     except (OSError, ValueError, KeyError) as error:
         LOG.error("Core check failed: %s", error)
         healthy = False
@@ -1458,8 +1621,60 @@ def doctor(options: Options) -> bool:
     root = options.discord_data / ".betterdiscord-patcher/backups"
     LOG.info("Installation backups: %d", len(list(root.glob("*/manifest.json"))))
     log_discord_app_version(options.discord_data)
-    LOG.info("%s", "File checks passed." if healthy else "Problems found. Missing macOS core files can be rebuilt with --repair.")
+    LOG.info(
+        "%s",
+        "File checks passed." if healthy else
+        "Problems found. Run betterdiscord --heal to restore the archive and loader. "
+        "Missing macOS core files can be rebuilt with --repair.",
+    )
     return healthy
+
+
+def heal(options: Options) -> bool:
+    valid = asar_is_valid(options.bd_asar)
+    needs_download = (not valid) or (options.download and options.force_download)
+    try:
+        install(replace(
+            options,
+            notify=False,
+            restart=False,
+            reopen=False,
+            wait_update=False,
+            cleanup_before_install=False,
+            download=needs_download,
+            force_download=needs_download,
+            bd_release="latest" if not valid else options.bd_release,
+        ))
+    except Exception as error:
+        LOG.error("Could not fully restore BetterDiscord: %s", error)
+        if not options.dry_run:
+            ensure_safe_injection(options)
+        return False
+    if options.dry_run:
+        return True
+    if not asar_is_valid(options.bd_asar):
+        LOG.error("BetterDiscord archive is still missing or invalid: %s", options.bd_asar)
+        return False
+    try:
+        cores = discord_core_dirs(options.discord_data)
+    except (OSError, FileNotFoundError) as error:
+        LOG.error("Loader check failed: %s", error)
+        return False
+    if any(core_needs_patch(core, options.bd_asar) for core in cores):
+        LOG.error("Discord is still missing the current BetterDiscord loader.")
+        return False
+    LOG.info("BetterDiscord archive and Discord loaders are in place.")
+    return True
+
+
+def ensure_safe_injection(options: Options) -> None:
+    try:
+        cores = discord_core_dirs(options.discord_data)
+    except (OSError, FileNotFoundError) as error:
+        LOG.error("Could not update Discord's loader: %s", error)
+        return
+    for core in cores:
+        patch_core(core, dry_run=options.dry_run, bd_asar=options.bd_asar)
 
 
 def install(options: Options) -> None:
@@ -1518,26 +1733,32 @@ def install(options: Options) -> None:
                 if discord_running(options.discord_data):
                     raise RuntimeError("Discord did not quit; installation was left untouched")
             if not options.dry_run:
-                needs_patch = any(
-                    not (core / "index.js").is_file()
-                    or "betterdiscord" not in (core / "index.js").read_text(encoding="utf-8").lower()
-                    for core in core_dirs
-                )
+                needs_patch = any(core_needs_patch(core, options.bd_asar) for core in core_dirs)
+                staged_bytes = staged_asar.read_bytes() if options.download else b""
                 replaces_asar = options.download and (
                     not options.bd_asar.is_file()
-                    or staged_asar.read_bytes() != options.bd_asar.read_bytes()
+                    or staged_bytes != options.bd_asar.read_bytes()
                 )
                 if needs_patch or replaces_asar:
                     snapshot = create_install_backup(options, core_dirs)
+                if options.download and replaces_asar:
+                    atomic_write(options.bd_asar, staged_bytes)
                 if options.download:
-                    atomic_write(options.bd_asar, staged_asar.read_bytes())
                     staged_etag = staged_asar.with_suffix(".etag")
                     destination_etag = options.bd_asar.with_suffix(".etag")
                     if staged_etag.exists():
-                        atomic_write(destination_etag, staged_etag.read_bytes())
-                    else:
-                        destination_etag.unlink(missing_ok=True)
-            changed = sum(patch_core(core_dir, dry_run=options.dry_run) for core_dir in core_dirs)
+                        etag_bytes = staged_etag.read_bytes()
+                        if not destination_etag.is_file() or destination_etag.read_bytes() != etag_bytes:
+                            atomic_write(destination_etag, etag_bytes)
+                    elif destination_etag.exists():
+                        destination_etag.unlink()
+                if not asar_is_valid(options.bd_asar):
+                    raise RuntimeError(f"BetterDiscord archive is missing or invalid after install: {options.bd_asar}")
+                LOG.info("BetterDiscord archive verified: %s", options.bd_asar)
+            changed = sum(
+                patch_core(core_dir, dry_run=options.dry_run, bd_asar=options.bd_asar)
+                for core_dir in core_dirs
+            )
             LOG.info("Discord cores patched: %d", changed)
             log_discord_app_version(options.discord_data)
         except Exception:
@@ -1552,10 +1773,6 @@ def install(options: Options) -> None:
     if options.cleanup_before_install:
         try:
             protected_versions = sanitize_shipit_request(options.discord_data, dry_run=options.dry_run)
-            if platform.system() == "Darwin":
-                info = discord_release_for_data(options.discord_data).app_path / "Contents/Resources/build_info.json"
-                active_version = json.loads(info.read_text(encoding="utf-8"))["version"]
-                protected_versions.add(options.discord_data / f"app-{active_version}")
             cleanup_old_versions(options.discord_data, options.keep_versions, options.dry_run, protected_versions)
         except (OSError, ValueError, KeyError) as error:
             LOG.warning("Installed successfully; skipping cleanup: %s", error)
@@ -1582,13 +1799,13 @@ def release_name_for_discord_data(discord_data: Path) -> str:
     return "custom"
 
 
-def windows_process_name(discord_data: Path) -> str:
-    release = release_name_for_discord_data(discord_data)
-    if release == "ptb":
-        return "DiscordPTB.exe"
-    if release == "canary":
-        return "DiscordCanary.exe"
-    return "Discord.exe"
+def windows_process_name(discord_data: Path) -> Optional[str]:
+    return {
+        "stable": "Discord.exe",
+        "ptb": "DiscordPTB.exe",
+        "canary": "DiscordCanary.exe",
+        "development": "DiscordDevelopment.exe",
+    }.get(release_name_for_discord_data(discord_data))
 
 
 def discord_version_dirs(discord_data: Path) -> list[Path]:
@@ -1681,14 +1898,17 @@ def discord_core_index_paths(discord_data: Path) -> list[Path]:
     return [core_dir / "index.js" for core_dir in discord_core_dirs(discord_data)]
 
 
-def patch_core(core_dir: Path, dry_run: bool) -> bool:
+def patch_core(core_dir: Path, dry_run: bool, bd_asar: Path = BD_ASAR) -> bool:
     index_js = core_dir / "index.js"
-    if index_js.exists() and "betterdiscord" in index_js.read_text(encoding="utf-8", errors="ignore").lower():
+    expected = injection_source(bd_asar)
+    if index_js.is_file() and index_js.read_text(encoding="utf-8", errors="ignore") == expected:
         LOG.info("Already patched: %s", index_js)
         return False
-    LOG.info("%sPatch: %s", "[dry-run] " if dry_run else "", index_js)
+    previous = index_js.read_text(encoding="utf-8", errors="ignore") if index_js.is_file() else ""
+    action = "Update patch" if "betterdiscord" in previous.lower() else "Patch"
+    LOG.info("%s%s: %s", "[dry-run] " if dry_run else "", action, index_js)
     if not dry_run:
-        atomic_write(index_js, INJECTION.encode("utf-8"))
+        atomic_write(index_js, expected.encode("utf-8"))
     return True
 
 
@@ -1697,8 +1917,11 @@ def download_asar(path: Path, force: bool, dry_run: bool, release: str = "latest
     release = release.strip() or "latest"
     url, label = betterdiscord_asar_download(release)
     request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{SCRIPT_VERSION}"})
-    if release == "latest" and path.exists() and etag_path.exists() and not force:
+    cached_ok = asar_is_valid(path)
+    if release == "latest" and path.exists() and etag_path.exists() and not force and cached_ok:
         request.add_header("If-None-Match", etag_path.read_text(encoding="utf-8").strip())
+    elif path.exists() and not cached_ok and not dry_run:
+        LOG.info("Cached BetterDiscord archive is invalid; downloading a new copy.")
 
     LOG.info("%sDownload BetterDiscord asar: %s", "[dry-run] " if dry_run else "", label)
     if dry_run:
@@ -1706,17 +1929,22 @@ def download_asar(path: Path, force: bool, dry_run: bool, release: str = "latest
 
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            data = response.read()
+            data = read_body(response)
             etag = response.headers.get("ETag")
     except urllib.error.HTTPError as error:
         if error.code == 304:
-            LOG.info("BetterDiscord asar is already up to date.")
-            return False
+            if asar_is_valid(path):
+                LOG.info("BetterDiscord asar is already up to date.")
+                return False
+            if force:
+                raise RuntimeError("BetterDiscord archive is invalid and the server returned Not Modified")
+            LOG.info("Cached BetterDiscord archive failed validation; downloading again.")
+            return download_asar(path, force=True, dry_run=False, release=release)
         raise
 
-    path.parent.mkdir(parents=True, exist_ok=True)
     validate_asar(data)
     atomic_write(path, data)
+    validate_asar(path.read_bytes())
     if etag:
         atomic_write(etag_path, etag.encode("utf-8"))
     else:
@@ -1812,9 +2040,25 @@ def betterdiscord_asar_asset_url(release: dict) -> Optional[str]:
     return None
 
 
-def discord_release_for_data(discord_data: Optional[Path] = None) -> DiscordRelease:
+def discord_release_for_data(discord_data: Optional[Path] = None) -> Optional[DiscordRelease]:
     release = release_name_for_discord_data(discord_data or DISCORD_DATA)
-    return DISCORD_RELEASES.get(release, DISCORD_RELEASES["stable"])
+    return DISCORD_RELEASES.get(release)
+
+
+def protected_version_dirs(discord_data: Path) -> set[Path]:
+    if platform.system() != "Darwin":
+        return set()
+    release = discord_release_for_data(discord_data)
+    if release is None:
+        return set()
+    try:
+        info = release.app_path / "Contents/Resources/build_info.json"
+        version = json.loads(info.read_text(encoding="utf-8")).get("version")
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+    if not version:
+        return set()
+    return {discord_data / f"app-{version}", discord_data / str(version)}
 
 
 def file_url_to_path(url: str) -> Optional[Path]:
@@ -1868,34 +2112,67 @@ def sanitize_shipit_request(discord_data: Path, dry_run: bool) -> set[Path]:
 def discord_update_dir(discord_data: Optional[Path] = None) -> Optional[Path]:
     if platform.system() == "Windows":
         return None
-    state = discord_release_for_data(discord_data).shipit_state
+    release = discord_release_for_data(discord_data)
+    if release is None:
+        return None
+    state = release.shipit_state
     try:
         with state.open("rb") as file:
-            url = plistlib.load(file).get("updateBundleURL", "")
+            url = str(plistlib.load(file).get("updateBundleURL", "") or "")
     except FileNotFoundError:
         return None
-    except (OSError, plistlib.InvalidFileException) as error:
+    except (OSError, plistlib.InvalidFileException, TypeError, ValueError) as error:
         LOG.warning("Could not inspect Discord updater state: %s", error)
         return None
-    if url.startswith("file://"):
-        url = url[7:-13]
-    return Path(url) if url else None
+    path = file_url_to_path(url)
+    if path is None and url:
+        path = Path(url)
+    if path is None:
+        return None
+    if path.name.endswith(".app"):
+        path = path.parent
+    if path.name == "ShipIt_update" or path.name.startswith("update."):
+        return path
+    if discord_data is not None:
+        try:
+            path.resolve(strict=False).relative_to(discord_data.resolve(strict=False))
+        except (OSError, ValueError):
+            return None
+        return path
+    return None
+
+
+def update_pending(discord_data: Optional[Path], update_dir: Optional[Path]) -> bool:
+    if shipit_running(discord_data):
+        return True
+    if update_dir is None or not update_dir.exists():
+        return False
+    try:
+        age = time.time() - update_dir.stat().st_mtime
+    except OSError:
+        return False
+    # Leftover ShipIt folders can sit around after a finished update.
+    return age < 120
 
 
 def wait_for_update(discord_data: Optional[Path], update_dir: Optional[Path], timeout: float = 180.0) -> bool:
     release = discord_release_for_data(discord_data)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not shipit_running(discord_data) and (update_dir is None or not update_dir.exists()):
+    name = release.name if release else "Discord"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not update_pending(discord_data, update_dir):
             return True
-        LOG.info("Waiting for %s updater...", release.name)
+        LOG.info("Waiting for %s updater...", name)
         time.sleep(2)
     return False
 
 
 def discord_running(discord_data: Optional[Path] = None) -> bool:
+    target = discord_data or DISCORD_DATA
     if platform.system() == "Windows":
-        process_name = windows_process_name(discord_data or DISCORD_DATA)
+        process_name = windows_process_name(target)
+        if not process_name:
+            return False
         result = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {process_name}"],
             capture_output=True,
@@ -1903,7 +2180,9 @@ def discord_running(discord_data: Optional[Path] = None) -> bool:
             check=False,
         )
         return process_name in result.stdout
-    release = discord_release_for_data(discord_data)
+    release = discord_release_for_data(target)
+    if release is None:
+        return False
     return subprocess.run(["pgrep", "-x", release.app_name], capture_output=True).returncode == 0
 
 
@@ -1911,32 +2190,43 @@ def shipit_running(discord_data: Optional[Path] = None) -> bool:
     if platform.system() == "Windows":
         return False
     release = discord_release_for_data(discord_data)
+    if release is None:
+        return False
     result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
     return any("ShipIt" in line and release.name in line for line in result.stdout.splitlines())
 
 
 def quit_discord(discord_data: Optional[Path] = None) -> None:
+    target = discord_data or DISCORD_DATA
     LOG.info("Quitting Discord")
     if platform.system() == "Windows":
-        target = discord_data or DISCORD_DATA
         process_name = windows_process_name(target)
+        if not process_name:
+            LOG.warning("Not quitting Discord; %s is not a known release folder.", target)
+            return
         subprocess.run(["taskkill", "/IM", process_name, "/T", "/F"], check=False, capture_output=True)
-        deadline = time.time() + 15
-        while time.time() < deadline and discord_running(target):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and discord_running(target):
             time.sleep(0.25)
         return
-    release = discord_release_for_data(discord_data)
+    release = discord_release_for_data(target)
+    if release is None:
+        LOG.warning("Not quitting Discord; %s is not a known release folder.", target)
+        return
     subprocess.run(["osascript", "-e", f'quit app "{escape_osa(release.app_name)}"'], check=False)
-    deadline = time.time() + 10
-    while time.time() < deadline and discord_running(discord_data):
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and discord_running(target):
         time.sleep(0.25)
 
 
 def open_discord(discord_data: Optional[Path] = None) -> None:
+    target = discord_data or DISCORD_DATA
     LOG.info("Reopening Discord")
     if platform.system() == "Windows":
-        target = discord_data or DISCORD_DATA
         process_name = windows_process_name(target)
+        if not process_name:
+            LOG.warning("Not reopening Discord; %s is not a known release folder.", target)
+            return
         update_exe = target / "Update.exe"
         if update_exe.exists():
             subprocess.run(
@@ -1958,7 +2248,10 @@ def open_discord(discord_data: Optional[Path] = None) -> None:
 
         LOG.warning("Could not find a Windows Discord executable to reopen.")
         return
-    release = discord_release_for_data(discord_data)
+    release = discord_release_for_data(target)
+    if release is None:
+        LOG.warning("Not reopening Discord; %s is not a known release folder.", target)
+        return
     if release.app_path.exists():
         subprocess.run(["open", str(release.app_path)], check=False)
         return
@@ -1969,12 +2262,147 @@ def log_discord_app_version(discord_data: Optional[Path] = None) -> None:
     if platform.system() == "Windows":
         return
     release = discord_release_for_data(discord_data)
+    if release is None:
+        return
     try:
         with (release.app_path / "Contents/Info.plist").open("rb") as file:
             version = plistlib.load(file).get("CFBundleShortVersionString")
             LOG.info("%s app version: %s", release.name, version or "unknown")
     except Exception as error:
         LOG.debug("Could not read %s app version: %s", release.name, error)
+
+
+def watcher_plist_path() -> Path:
+    return HOME / "Library/LaunchAgents" / f"{WATCHER_LABEL}.plist"
+
+
+def watcher_log_path() -> Path:
+    return HOME / "Library/Logs/BetterDiscordPatcher/heal.log"
+
+
+def watcher_command(config_path: Path) -> list[str]:
+    # Use the interpreter that is running this command. launchd and Task
+    # Scheduler do not search Homebrew or a user PATH.
+    return [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path.expanduser()), "--heal"]
+
+
+def install_watcher(discord_dirs: list[Path], bd_asar: Path, config_path: Path, dry_run: bool) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        install_launchd_watcher(discord_dirs, bd_asar, config_path, dry_run)
+        return
+    if system == "Windows":
+        install_windows_watcher(config_path, dry_run)
+        return
+    raise RuntimeError("The watcher supports macOS and Windows only")
+
+
+def install_launchd_watcher(discord_dirs: list[Path], bd_asar: Path, config_path: Path, dry_run: bool) -> None:
+    plist_path = watcher_plist_path()
+    log_path = watcher_log_path()
+    watch_paths = [str(bd_asar.expanduser().parent)]
+    watch_paths.extend(str(path.expanduser()) for path in discord_dirs)
+    unique_paths = list(dict.fromkeys(watch_paths))
+    payload = {
+        "Label": WATCHER_LABEL,
+        "ProgramArguments": watcher_command(config_path),
+        "RunAtLoad": True,
+        "StartInterval": WATCHER_INTERVAL_SECONDS,
+        "WatchPaths": unique_paths,
+        "StandardOutPath": str(log_path),
+        "StandardErrorPath": str(log_path),
+    }
+    LOG.info("%sInstall launch agent: %s", "[dry-run] " if dry_run else "", plist_path)
+    if dry_run:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    bd_asar.expanduser().parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(plist_path, plistlib.dumps(payload, fmt=plistlib.FMT_XML))
+    uid = os.getuid()
+    domain = f"gui/{uid}"
+    subprocess.run(["launchctl", "bootout", domain, str(plist_path)], check=False, capture_output=True)
+    result = subprocess.run(
+        ["launchctl", "bootstrap", domain, str(plist_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or "launchctl bootstrap failed")
+    subprocess.run(["launchctl", "enable", f"{domain}/{WATCHER_LABEL}"], check=False, capture_output=True)
+    subprocess.run(["launchctl", "kickstart", f"{domain}/{WATCHER_LABEL}"], check=False, capture_output=True)
+    LOG.info(
+        "Watcher installed. It runs betterdiscord --heal at login, every %d minutes, and when the watched folders change.",
+        WATCHER_INTERVAL_SECONDS // 60,
+    )
+
+
+def install_windows_watcher(config_path: Path, dry_run: bool) -> None:
+    command = subprocess.list2cmdline(watcher_command(config_path))
+    LOG.info("%sInstall scheduled task: %s", "[dry-run] " if dry_run else "", WATCHER_TASK_NAME)
+    if dry_run:
+        return
+    result = subprocess.run(
+        [
+            "schtasks",
+            "/Create",
+            "/F",
+            "/SC",
+            "MINUTE",
+            "/MO",
+            str(max(1, WATCHER_INTERVAL_SECONDS // 60)),
+            "/TN",
+            WATCHER_TASK_NAME,
+            "/TR",
+            command,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or "schtasks failed")
+    LOG.info("Watcher installed. It runs betterdiscord --heal every %d minutes.", WATCHER_INTERVAL_SECONDS // 60)
+
+
+def remove_watcher(dry_run: bool, quiet_if_missing: bool = False) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        plist_path = watcher_plist_path()
+        if not plist_path.exists():
+            if not quiet_if_missing:
+                LOG.info("Watcher is not installed.")
+            return
+        LOG.info("%sRemove launch agent: %s", "[dry-run] " if dry_run else "", plist_path)
+        if dry_run:
+            return
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}", str(plist_path)],
+            check=False,
+            capture_output=True,
+        )
+        plist_path.unlink(missing_ok=True)
+        LOG.info("Removed launch agent.")
+        return
+    if system == "Windows":
+        LOG.info("%sRemove scheduled task: %s", "[dry-run] " if dry_run else "", WATCHER_TASK_NAME)
+        if dry_run:
+            return
+        result = subprocess.run(
+            ["schtasks", "/Delete", "/F", "/TN", WATCHER_TASK_NAME],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            LOG.info("Removed scheduled task.")
+        elif not quiet_if_missing:
+            LOG.info("Watcher is not installed.")
+        return
+    if not quiet_if_missing:
+        LOG.info("No watcher is installed on this platform.")
 
 
 def notify(title: str, message: str, enabled: bool) -> None:
