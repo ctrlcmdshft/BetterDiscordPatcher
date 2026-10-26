@@ -45,6 +45,9 @@ betterdiscord --all
 betterdiscord --dry-run
 betterdiscord --repair --dry-run
 betterdiscord --repair
+betterdiscord --heal
+betterdiscord --install-watcher
+betterdiscord --uninstall-watcher
 betterdiscord --edit-config
 betterdiscord --format-config
 betterdiscord --cleanup-old --dry-run
@@ -140,6 +143,21 @@ return an error without changing installed files; newer local versions are kept.
 
 ## Repair
 
+If Discord fails at startup with `Cannot find module '.../betterdiscord.asar'`,
+the desktop-core loader is still installed and the BetterDiscord archive is
+missing or was replaced mid-update. Run:
+
+```sh
+betterdiscord --heal
+```
+
+`--heal` checks every installed `app-*` folder and `discord_desktop_core-*`
+module, replaces an outdated loader, and re-downloads `betterdiscord.asar` when
+the file is missing or not a valid archive. It does not quit Discord. The
+loader now ignores a missing or unreadable archive and still starts Discord, so
+a later launch is not taken down by the same error. A normal `betterdiscord`
+run also refreshes an older unguarded loader.
+
 On macOS, if Discord reports `Cannot find module 'discord_desktop_core'`, run:
 
 ```sh
@@ -150,10 +168,30 @@ betterdiscord --repair
 When the current Discord core files are missing, repair quits Discord, moves its
 updater database into a `core-repair-backup-*` folder inside the Discord data
 folder, and reopens Discord to download the missing files. It then restores the
-BetterDiscord loader, keeping your existing BetterDiscord version when available.
-Your settings, plugins, and themes are preserved. Internet access is required to
-rebuild missing files. Repair skips old-version cleanup and currently supports
-macOS only. If core files already exist, it only restores the loader.
+BetterDiscord loader. A valid existing archive is kept; a missing or corrupt
+archive is downloaded again. Your settings, plugins, and themes are preserved.
+Internet access is required to rebuild missing files. Repair skips old-version
+cleanup. The database rebuild is macOS-only. On Windows, `--repair` restores
+the archive and loader without moving Discord's updater database. If core files
+already exist, it only restores BetterDiscord.
+
+`--doctor` reports a missing, empty, or invalid archive and an outdated loader
+that can crash Discord. It does not change files.
+
+To re-apply that check after Discord updates replace `app-*` or
+`discord_desktop_core-*` folders, install the optional watcher:
+
+```sh
+betterdiscord --install-watcher
+betterdiscord --uninstall-watcher
+```
+
+On macOS this is a per-user launch agent. It runs `betterdiscord --heal` at
+login, every 15 minutes, and when the BetterDiscord data folder or the
+configured Discord data folders change. On Windows it is a per-user scheduled
+task that runs every 15 minutes. `--uninstall` removes the watcher as well.
+The watcher follows the saved config, including `release`, so set `"release": "all"`
+if every installed Discord channel should be kept patched. It does not quit Discord.
 
 ## Diagnostics and Rollback
 
@@ -165,16 +203,22 @@ betterdiscord --rollback
 
 `--doctor` checks local version folders, core loaders, the BetterDiscord file,
 and available backups without changing files or offering a script update.
-It exits with a nonzero status when file checks find a problem. It does not
-test plugin compatibility or whether Discord can connect.
+It exits with a nonzero status when file checks find a problem, including a
+missing or invalid archive or a loader that still requires the archive
+unconditionally. It does not test plugin compatibility or whether Discord can
+connect.
 
 Installations stage downloads before quitting Discord or changing installed
 files. Before replacing an archive or patching a loader, the script saves the
 previous files under `.betterdiscord-patcher/backups` in the Discord data folder.
 Files are replaced atomically, and a failed installation attempts to restore
-that backup. Downloads are checked for valid archive structure and truncated
-file contents before installation. Cleanup runs only after installation succeeds and preserves the
-installed macOS app version.
+that backup. Downloads are checked for a complete body and valid archive
+structure before installation. A cached archive that fails that check is
+downloaded again instead of being kept because an old ETag still matches.
+The injected loader catches a missing or unreadable archive and still starts
+Discord. Cleanup runs only after installation succeeds and preserves the
+installed macOS app version, including when a newer `app-*` folder is also
+present.
 
 `--rollback` restores the latest completed installation backup after checking
 its file checksums. It does not downgrade Discord itself, restore deleted old

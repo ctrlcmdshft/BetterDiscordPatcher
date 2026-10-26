@@ -1,3 +1,5 @@
+import json
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,6 +7,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import betterdiscord as bd
+
+
+def archive(content=b"existing BetterDiscord"):
+    header = json.dumps({"files": {"main.js": {"offset": "0", "size": len(content)}}}).encode()
+    padding = b"\0" * (-(len(header) + 4) % 4)
+    payload = struct.pack("<I", len(header)) + header + padding
+    pickle = struct.pack("<I", len(payload)) + payload
+    return struct.pack("<II", 4, len(pickle)) + pickle + content
 
 
 class RepairTests(unittest.TestCase):
@@ -20,7 +30,7 @@ class RepairTests(unittest.TestCase):
         (resources / "build_info.json").write_text('{"version":"0.0.414"}')
         self.core = self.data / "app-0.0.414/modules/discord_desktop_core-2/discord_desktop_core"
         self.asar = self.root / "betterdiscord.asar"
-        self.asar.write_bytes(b"existing BetterDiscord")
+        self.asar.write_bytes(archive())
         self.options = bd.Options(
             "stable", self.data, self.asar, False, True, True, True,
             False, "latest", False, True, 1, False,
@@ -60,6 +70,32 @@ class RepairTests(unittest.TestCase):
         self.run.assert_not_called()
         self.open.assert_not_called()
         self.install.assert_not_called()
+
+    def test_invalid_archive_is_redownloaded_without_touching_database(self):
+        self.rebuild(self.data)
+        self.asar.write_bytes(b"truncated")
+        database = self.data / "installer.db"
+        database.write_bytes(b"original")
+        bd.repair_discord(self.options)
+        self.assertEqual(database.read_bytes(), b"original")
+        repaired = self.install.call_args.args[0]
+        self.assertTrue(repaired.download)
+        self.assertTrue(repaired.force_download)
+        self.assertEqual(repaired.bd_release, "latest")
+        self.open.assert_not_called()
+
+    def test_windows_repair_restores_invalid_archive_without_database_changes(self):
+        database = self.data / "installer.db"
+        database.write_bytes(b"original")
+        self.asar.write_bytes(b"truncated")
+        with patch("betterdiscord.platform.system", return_value="Windows"):
+            bd.repair_discord(self.options)
+        self.assertEqual(database.read_bytes(), b"original")
+        self.run.assert_not_called()
+        self.open.assert_not_called()
+        repaired = self.install.call_args.args[0]
+        self.assertTrue(repaired.download)
+        self.assertTrue(repaired.force_download)
 
     def test_existing_core_leaves_database_alone(self):
         self.rebuild(self.data)
