@@ -70,7 +70,7 @@ class InstallTests(unittest.TestCase):
         self.assertEqual(self.asar.read_bytes(), self.previous_archive)
 
     def test_patch_failure_restores_archive_and_loader_and_reopens(self):
-        def failed_patch(core, dry_run):
+        def failed_patch(core, dry_run, bd_asar=None):
             (core / "index.js").write_bytes(b"partial change")
             raise OSError("patch failed")
         with patch("betterdiscord.patch_core", side_effect=failed_patch), patch("betterdiscord.cleanup_old_versions") as cleanup:
@@ -105,7 +105,7 @@ class InstallTests(unittest.TestCase):
         self.download.assert_not_called()
 
     def test_no_op_install_keeps_previous_rollback_backup(self):
-        self.index.write_text(bd.INJECTION)
+        self.index.write_text(bd.injection_source(self.asar))
         self.running.side_effect = None
         self.running.return_value = False
         bd.install(bd.replace(self.options, download=False))
@@ -136,6 +136,22 @@ class InstallTests(unittest.TestCase):
         self.quit.assert_not_called()
         self.assertEqual(self.asar.read_bytes(), self.new_archive)
         self.assertIn(b"betterdiscord", self.index.read_bytes())
+
+    def test_outdated_loader_is_replaced_with_a_guarded_require(self):
+        self.index.write_text(
+            'require(path.join(userConfig, "BetterDiscord", "data", "betterdiscord.asar"));\n'
+            'module.exports = require("./core.asar");\n'
+        )
+        self.running.side_effect = None
+        self.running.return_value = False
+        bd.install(bd.replace(self.options, download=False))
+        script = self.index.read_text(encoding="utf-8")
+        self.assertIn("existsSync", script)
+        self.assertIn("catch", script)
+        self.assertIn(json.dumps(str(self.asar)), script)
+        self.assertLess(script.index(json.dumps(str(self.asar))), script.index("module.exports"))
+        self.assertIn('require("./core.asar")', script)
+        self.download.assert_not_called()
 
     def test_cleanup_failure_does_not_undo_successful_install(self):
         with patch("betterdiscord.sanitize_shipit_request", return_value=set()), patch(

@@ -32,6 +32,14 @@ class DiscordStartupTests(unittest.TestCase):
             file.write("Cannot find module 'discord_desktop_core'\n")
         self.assertFalse(bd.check_discord_errors(self.data, positions))
 
+    def test_guarded_loader_warning_is_not_a_startup_failure(self):
+        self.renderer_log(
+            "splashScreenPreload: signalReady\n"
+            "[BetterDiscordPatcher] Failed to load BetterDiscord from /tmp/betterdiscord.asar: "
+            "Error: Cannot find module '/tmp/betterdiscord.asar'\n"
+        )
+        self.assertTrue(bd.check_discord_errors(self.data))
+
     def test_latest_session_does_not_report_previous_session_error(self):
         self.renderer_log("fatal error: yesterday\nsplashScreenPreload: signalReady\nready\n")
         self.assertTrue(bd.check_discord_errors(self.data))
