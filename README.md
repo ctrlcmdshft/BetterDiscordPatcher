@@ -176,22 +176,41 @@ the archive and loader without moving Discord's updater database. If core files
 already exist, it only restores BetterDiscord.
 
 `--doctor` reports a missing, empty, or invalid archive and an outdated loader
-that can crash Discord. It does not change files.
+that can crash Discord. It does not change files. If macOS refuses to read
+Discord's data folder, it prints which program to allow and opens Full Disk
+Access instead of a generic core-check error.
 
-To re-apply that check after Discord updates replace `app-*` or
-`discord_desktop_core-*` folders, install the optional watcher:
+Discord updates create a new `app-*` folder. BetterDiscord is not in that
+folder until the patcher can read it and run again. On macOS, a program that
+is not Terminal is often blocked with `Operation not permitted` ("access data
+from other apps"). Grant Full Disk Access to the Python program the patcher
+prints, and also to Terminal if that is where you run the command. Permission
+given only to Terminal does not apply to the watcher, because the watcher
+starts Python directly.
 
 ```sh
+open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+```
+
+```sh
+betterdiscord --heal
 betterdiscord --install-watcher
 betterdiscord --uninstall-watcher
 ```
 
-On macOS this is a per-user launch agent. It runs `betterdiscord --heal` at
-login, every 15 minutes, and when the BetterDiscord data folder or the
-configured Discord data folders change. On Windows it is a per-user scheduled
-task that runs every 15 minutes. `--uninstall` removes the watcher as well.
-The watcher follows the saved config, including `release`, so set `"release": "all"`
-if every installed Discord channel should be kept patched. It does not quit Discord.
+`--install-watcher` checks that Discord's folder is readable, then installs
+the watcher. If macOS blocks access, the command exits with an error and
+tells you which program to allow. On macOS the watcher is a per-user launch
+agent. It runs `betterdiscord --heal` at login, every 15 minutes, and when a
+Discord version folder appears or changes. A new version is often still being
+written when the folder first shows up, so the watcher waits for the loader
+file before patching. It posts a notification when a repair succeeds or
+fails, and writes the same output to
+`~/Library/Logs/BetterDiscordPatcher/heal.log`. On Windows it is a per-user
+scheduled task that runs every 15 minutes. `--uninstall` removes the watcher
+as well. The watcher follows the saved config, including `release`, so set
+`"release": "all"` if every installed Discord channel should be kept patched.
+It does not quit Discord.
 
 ## Diagnostics and Rollback
 

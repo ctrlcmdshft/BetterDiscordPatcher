@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import hashlib
 import json
 import logging
@@ -27,7 +28,7 @@ BD_ASAR_REPO = "BetterDiscord/BetterDiscord"
 BD_ASAR_URL = f"https://github.com/{BD_ASAR_REPO}/releases/latest/download/betterdiscord.asar"
 BD_RELEASES_API = f"https://api.github.com/repos/{BD_ASAR_REPO}/releases?per_page=30"
 APP_NAME = "BetterDiscordPatcher"
-SCRIPT_VERSION = "2.5.0"
+SCRIPT_VERSION = "2.6.0"
 REPO = "ctrlcmdshft/BetterDiscordPatcher"
 BRANCH = "main"
 RAW_BASE = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}"
@@ -48,6 +49,14 @@ MAC_RELEASE_DIRS = {
 WATCHER_LABEL = "com.betterdiscord.patcher.heal"
 WATCHER_TASK_NAME = "BetterDiscordPatcherHeal"
 WATCHER_INTERVAL_SECONDS = 900
+WATCHER_UPDATE_WAIT_SECONDS = 90
+WATCHER_PROBE_SECONDS = 3
+WATCHER_ENV = "BDP_WATCHER"
+# Full Disk Access is the list that lets a non-Terminal program read Discord's
+# data folder. App Management is the pane macOS uses for the related
+# "access data from other apps" prompt.
+PRIVACY_FULL_DISK_URL = "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AllFiles"
+PRIVACY_APP_DATA_URL = "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_AppBundles"
 RELEASE_ORDER = ("stable", "ptb", "canary")
 
 
@@ -301,7 +310,7 @@ def main() -> int:
 
     if args.install_watcher:
         try:
-            install_watcher(
+            installed = install_watcher(
                 args.target_discord_data,
                 args.bd_asar.expanduser(),
                 args.config.expanduser(),
@@ -310,7 +319,7 @@ def main() -> int:
         except Exception as error:
             LOG.error("Could not install the watcher: %s", error)
             return 1
-        return 0
+        return 0 if installed else 1
 
     if args.uninstall_watcher:
         try:
@@ -1577,6 +1586,7 @@ def doctor(options: Options) -> bool:
     LOG.info("Discord release: %s", options.release)
     LOG.info("Discord data: %s", options.discord_data)
     healthy = True
+    access_blocked = False
     try:
         versions = discord_version_dirs(options.discord_data)
         LOG.info("Version folders: %s", ", ".join(path.name for path in versions))
@@ -1605,8 +1615,18 @@ def doctor(options: Options) -> bool:
                 LOG.info("Core: %s [BetterDiscord patched]", core)
             else:
                 LOG.info("Core: %s [unpatched]", core)
+    except DiscordDataAccessError as error:
+        LOG.error("%s", error)
+        open_privacy_settings()
+        access_blocked = True
+        healthy = False
     except (OSError, ValueError, KeyError) as error:
-        LOG.error("Core check failed: %s", error)
+        if isinstance(error, OSError) and is_access_denied(error):
+            LOG.error("%s", access_denied_message(options.discord_data))
+            open_privacy_settings()
+            access_blocked = True
+        else:
+            LOG.error("Core check failed: %s", error)
         healthy = False
     try:
         if not options.bd_asar.is_file() or options.bd_asar.stat().st_size == 0:
@@ -1619,21 +1639,43 @@ def doctor(options: Options) -> bool:
         LOG.error("BetterDiscord file check failed: %s", error)
         healthy = False
     root = options.discord_data / ".betterdiscord-patcher/backups"
-    LOG.info("Installation backups: %d", len(list(root.glob("*/manifest.json"))))
+    try:
+        backups = len(list(root.glob("*/manifest.json")))
+    except OSError as error:
+        if is_access_denied(error):
+            LOG.info("Installation backups: unavailable until Discord's folder can be read")
+        else:
+            LOG.info("Installation backups: unavailable (%s)", error)
+    else:
+        LOG.info("Installation backups: %d", backups)
     log_discord_app_version(options.discord_data)
-    LOG.info(
-        "%s",
-        "File checks passed." if healthy else
-        "Problems found. Run betterdiscord --heal to restore the archive and loader. "
-        "Missing macOS core files can be rebuilt with --repair.",
-    )
+    if access_blocked:
+        LOG.info("Grant the permission above, then run betterdiscord --heal.")
+    elif healthy:
+        LOG.info("File checks passed.")
+    else:
+        LOG.info(
+            "Problems found. Run betterdiscord --heal to restore the archive and loader. "
+            "Missing macOS core files can be rebuilt with --repair.",
+        )
     return healthy
 
 
 def heal(options: Options) -> bool:
     valid = asar_is_valid(options.bd_asar)
     needs_download = (not valid) or (options.download and options.force_download)
+    needs_patch = False
     try:
+        if os.environ.get(WATCHER_ENV) == "1" and not options.dry_run:
+            LOG.info("Watcher heal starting.")
+            wait_for_new_discord_loader(options.discord_data)
+        try:
+            needs_patch = any(
+                core_needs_patch(core, options.bd_asar)
+                for core in discord_core_dirs(options.discord_data)
+            )
+        except FileNotFoundError:
+            needs_patch = True
         install(replace(
             options,
             notify=False,
@@ -1645,8 +1687,15 @@ def heal(options: Options) -> bool:
             force_download=needs_download,
             bd_release="latest" if not valid else options.bd_release,
         ))
+    except DiscordDataAccessError as error:
+        LOG.error("%s", error)
+        notify_heal_result("macOS blocked Discord's data folder. Allow Python in Full Disk Access.")
+        if os.environ.get(WATCHER_ENV) != "1":
+            open_privacy_settings()
+        return False
     except Exception as error:
         LOG.error("Could not fully restore BetterDiscord: %s", error)
+        notify_heal_result("Could not restore BetterDiscord.")
         if not options.dry_run:
             ensure_safe_injection(options)
         return False
@@ -1664,6 +1713,8 @@ def heal(options: Options) -> bool:
         LOG.error("Discord is still missing the current BetterDiscord loader.")
         return False
     LOG.info("BetterDiscord archive and Discord loaders are in place.")
+    if needs_download or needs_patch:
+        notify_heal_result("BetterDiscord loader restored.")
     return True
 
 
@@ -1808,16 +1859,160 @@ def windows_process_name(discord_data: Path) -> Optional[str]:
     }.get(release_name_for_discord_data(discord_data))
 
 
-def discord_version_dirs(discord_data: Path) -> list[Path]:
-    if not discord_data.exists():
-        raise FileNotFoundError(f"Discord data folder not found: {discord_data}")
+class DiscordDataAccessError(PermissionError):
+    """macOS or Windows refused to list Discord's data folder."""
+
+
+def is_access_denied(error: BaseException) -> bool:
+    errno_value = getattr(error, "errno", None)
+    if errno_value in (errno.EPERM, errno.EACCES):
+        return True
+    message = str(error).lower()
+    return "operation not permitted" in message or "permission denied" in message
+
+
+def process_attribute(pid: int, attribute: str) -> str:
     try:
-        versions = sorted((p for p in discord_data.iterdir() if version_key(p)), key=version_key)
-    except PermissionError as error:
-        raise PermissionError(f"Cannot read Discord data folder: {discord_data}") from error
+        result = subprocess.run(
+            ["ps", "-o", f"{attribute}=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return result.stdout.strip()
+
+
+def app_bundle_from_command(command: str) -> Optional[str]:
+    marker = ".app/"
+    index = command.find(marker)
+    if index == -1:
+        return None
+    return command[:index + len(".app")]
+
+
+def access_targets() -> list[str]:
+    """Programs macOS will hold responsible for reading Discord's data."""
+    targets = []
+    resolved = str(Path(sys.executable).resolve(strict=False))
+    targets.append(resolved)
+    if str(Path(sys.executable)) != resolved:
+        targets.append(str(Path(sys.executable)))
+    pid = os.getpid()
+    seen = set()
+    for _ in range(8):
+        if pid <= 1 or pid in seen:
+            break
+        seen.add(pid)
+        bundle = app_bundle_from_command(process_attribute(pid, "command"))
+        if bundle and bundle not in targets:
+            targets.append(bundle)
+            break
+        parent = process_attribute(pid, "ppid")
+        if not parent.isdigit():
+            break
+        pid = int(parent)
+    return targets
+
+
+def access_denied_message(path: Path) -> str:
+    if platform.system() != "Darwin":
+        return (
+            f"Cannot read Discord data folder: {path}\n"
+            "The operating system denied access to that folder."
+        )
+    programs = "\n".join(f"    {target}" for target in access_targets())
+    return (
+        f"macOS blocked reading Discord's data folder:\n"
+        f"    {path}\n"
+        "Operation not permitted. This is the privacy setting that stops one program from\n"
+        "reading another app's data (\"access data from other apps\").\n"
+        "\n"
+        "BetterDiscord is still installed, but a new Discord version cannot be patched\n"
+        "until this program is allowed.\n"
+        "\n"
+        "Allow Full Disk Access for:\n"
+        f"{programs}\n"
+        "\n"
+        "The watcher runs the Python program directly. Permission granted only to\n"
+        "Terminal does not apply to it.\n"
+        "\n"
+        "Open System Settings → Privacy & Security → Full Disk Access:\n"
+        f"    {PRIVACY_FULL_DISK_URL}\n"
+        "\n"
+        "Click +, press Command-Shift-G, paste the Python path, and turn the switch on.\n"
+        "If it is already on, remove the entry and add it again. Then quit that app\n"
+        "with Command-Q, open it again, and run:\n"
+        "    betterdiscord --heal\n"
+        "\n"
+        "If macOS shows an \"access data from other apps\" prompt, allow it.\n"
+        "The related settings pane is App Management:\n"
+        f"    {PRIVACY_APP_DATA_URL}"
+    )
+
+
+def open_privacy_settings() -> None:
+    if platform.system() != "Darwin" or os.environ.get(WATCHER_ENV) == "1":
+        return
+    LOG.info("Opening Full Disk Access settings.")
+    subprocess.run(["open", PRIVACY_FULL_DISK_URL], check=False)
+
+
+def notify_heal_result(message: str) -> None:
+    if os.environ.get(WATCHER_ENV) == "1":
+        message = f"{message} Log: {watcher_log_path()}"
+    notify("BetterDiscord", message, True)
+
+
+def list_discord_entries(discord_data: Path) -> list[Path]:
+    try:
+        return list(discord_data.iterdir())
+    except FileNotFoundError as error:
+        raise FileNotFoundError(f"Discord data folder not found: {discord_data}") from error
+    except OSError as error:
+        if is_access_denied(error):
+            raise DiscordDataAccessError(access_denied_message(discord_data)) from error
+        raise
+
+
+def discord_version_dirs(discord_data: Path) -> list[Path]:
+    versions = sorted((path for path in list_discord_entries(discord_data) if version_key(path)), key=version_key)
     if not versions:
         raise FileNotFoundError(f"No Discord version folders found in {discord_data}")
     return versions
+
+
+def loader_is_ready(discord_data: Path) -> bool:
+    try:
+        versions = discord_version_dirs(discord_data)
+    except FileNotFoundError:
+        return False
+    latest = versions[-1]
+    try:
+        cores = discord_core_dirs(discord_data, versions)
+    except FileNotFoundError:
+        return False
+    latest_cores = [core for core in cores if core.is_relative_to(latest)]
+    if not latest_cores:
+        return False
+    return all((core / "index.js").is_file() and (core / "index.js").stat().st_size > 0 for core in latest_cores)
+
+
+def wait_for_new_discord_loader(discord_data: Path, timeout: Optional[float] = None) -> None:
+    """A new app-* folder shows up before Discord finishes writing its loader."""
+    if timeout is None:
+        timeout = WATCHER_UPDATE_WAIT_SECONDS
+    if loader_is_ready(discord_data):
+        return
+    LOG.info("Discord is still writing its new version; waiting up to %d seconds.", int(timeout))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(1)
+        if loader_is_ready(discord_data):
+            time.sleep(1)
+            return
+    LOG.info("Discord's new version is still incomplete; continuing with the files that are present.")
 
 
 def has_discord_desktop_core(version_dir: Path) -> bool:
@@ -2286,37 +2481,84 @@ def watcher_command(config_path: Path) -> list[str]:
     return [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path.expanduser()), "--heal"]
 
 
-def install_watcher(discord_dirs: list[Path], bd_asar: Path, config_path: Path, dry_run: bool) -> None:
+def watcher_paths(discord_dirs: list[Path], bd_asar: Path) -> list[str]:
+    watch_paths = [str(bd_asar.expanduser().parent)]
+    for path in discord_dirs:
+        expanded = path.expanduser()
+        watch_paths.append(str(expanded))
+        try:
+            for child in expanded.iterdir():
+                if child.is_dir() and (child.name.startswith("app-") or version_key(child)):
+                    watch_paths.append(str(child))
+        except OSError:
+            continue
+    return list(dict.fromkeys(watch_paths))
+
+
+def report_discord_access(discord_dirs: list[Path]) -> Optional[DiscordDataAccessError]:
+    denied = None
+    for path in discord_dirs:
+        expanded = path.expanduser()
+        try:
+            list_discord_entries(expanded)
+        except FileNotFoundError:
+            LOG.info("Discord data folder is not there yet: %s", expanded)
+            continue
+        except DiscordDataAccessError as error:
+            LOG.error("%s", error)
+            denied = error
+            continue
+        LOG.info("Discord data is readable: %s", expanded)
+    return denied
+
+
+def watcher_launch_outcome(log_path: Path, offset: int) -> Optional[str]:
+    if WATCHER_PROBE_SECONDS <= 0:
+        return None
+    deadline = time.monotonic() + WATCHER_PROBE_SECONDS
+    while time.monotonic() < deadline:
+        if log_path.is_file():
+            text = log_path.read_bytes()[offset:].decode("utf-8", "replace")
+            if "macOS blocked reading" in text or "Could not fully restore BetterDiscord" in text:
+                return text
+            if "BetterDiscord archive and Discord loaders are in place." in text:
+                return text
+        time.sleep(0.05)
+    return None
+
+
+def install_watcher(discord_dirs: list[Path], bd_asar: Path, config_path: Path, dry_run: bool) -> bool:
     system = platform.system()
     if system == "Darwin":
-        install_launchd_watcher(discord_dirs, bd_asar, config_path, dry_run)
-        return
+        return install_launchd_watcher(discord_dirs, bd_asar, config_path, dry_run)
     if system == "Windows":
         install_windows_watcher(config_path, dry_run)
-        return
+        return True
     raise RuntimeError("The watcher supports macOS and Windows only")
 
 
-def install_launchd_watcher(discord_dirs: list[Path], bd_asar: Path, config_path: Path, dry_run: bool) -> None:
+def install_launchd_watcher(discord_dirs: list[Path], bd_asar: Path, config_path: Path, dry_run: bool) -> bool:
     plist_path = watcher_plist_path()
     log_path = watcher_log_path()
-    watch_paths = [str(bd_asar.expanduser().parent)]
-    watch_paths.extend(str(path.expanduser()) for path in discord_dirs)
-    unique_paths = list(dict.fromkeys(watch_paths))
+    denied = report_discord_access(discord_dirs)
+    LOG.info("%sInstall launch agent: %s", "[dry-run] " if dry_run else "", plist_path)
+    if dry_run:
+        if denied:
+            open_privacy_settings()
+        return denied is None
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    bd_asar.expanduser().parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "Label": WATCHER_LABEL,
         "ProgramArguments": watcher_command(config_path),
+        "EnvironmentVariables": {WATCHER_ENV: "1"},
         "RunAtLoad": True,
         "StartInterval": WATCHER_INTERVAL_SECONDS,
-        "WatchPaths": unique_paths,
+        "ThrottleInterval": 10,
+        "WatchPaths": watcher_paths(discord_dirs, bd_asar),
         "StandardOutPath": str(log_path),
         "StandardErrorPath": str(log_path),
     }
-    LOG.info("%sInstall launch agent: %s", "[dry-run] " if dry_run else "", plist_path)
-    if dry_run:
-        return
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    bd_asar.expanduser().parent.mkdir(parents=True, exist_ok=True)
     atomic_write(plist_path, plistlib.dumps(payload, fmt=plistlib.FMT_XML))
     uid = os.getuid()
     domain = f"gui/{uid}"
@@ -2331,11 +2573,30 @@ def install_launchd_watcher(discord_dirs: list[Path], bd_asar: Path, config_path
         detail = (result.stderr or result.stdout or "").strip()
         raise RuntimeError(detail or "launchctl bootstrap failed")
     subprocess.run(["launchctl", "enable", f"{domain}/{WATCHER_LABEL}"], check=False, capture_output=True)
+    before = log_path.stat().st_size if log_path.is_file() else 0
     subprocess.run(["launchctl", "kickstart", f"{domain}/{WATCHER_LABEL}"], check=False, capture_output=True)
+    program = access_targets()[0]
+    LOG.info("Watcher program: %s", program)
+    LOG.info("Watcher log: %s", log_path)
     LOG.info(
-        "Watcher installed. It runs betterdiscord --heal at login, every %d minutes, and when the watched folders change.",
+        "The watcher is not launched inside Terminal, so Terminal's permission does not apply. "
+        "Add %s in Full Disk Access if macOS blocks the watcher.",
+        program,
+    )
+    LOG.info(
+        "Watcher installed. It runs betterdiscord --heal at login, every %d minutes, and when a Discord version folder changes.",
         WATCHER_INTERVAL_SECONDS // 60,
     )
+    if denied:
+        open_privacy_settings()
+        return False
+    # launchd runs Python itself. A check from Terminal can succeed while that job is still denied.
+    outcome = watcher_launch_outcome(log_path, before)
+    if outcome and "macOS blocked reading" in outcome:
+        LOG.error("The watcher could not read Discord's data. Details are in %s", log_path)
+        open_privacy_settings()
+        return False
+    return True
 
 
 def install_windows_watcher(config_path: Path, dry_run: bool) -> None:

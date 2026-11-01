@@ -1,3 +1,4 @@
+import errno
 import io
 import json
 import os
@@ -275,6 +276,7 @@ class WatcherTests(unittest.TestCase):
         patch("betterdiscord.platform.system", return_value="Darwin").start()
         patch("betterdiscord.watcher_plist_path", return_value=self.plist).start()
         patch("betterdiscord.watcher_log_path", return_value=self.log).start()
+        patch("betterdiscord.WATCHER_PROBE_SECONDS", 0).start()
         self.run = patch("betterdiscord.subprocess.run", return_value=SimpleNamespace(
             returncode=0, stdout="", stderr="",
         )).start()
@@ -288,6 +290,9 @@ class WatcherTests(unittest.TestCase):
         self.assertIn(str(self.asar.parent), loaded["WatchPaths"])
         self.assertIn(str(self.data), loaded["WatchPaths"])
         self.assertEqual(loaded["StartInterval"], bd.WATCHER_INTERVAL_SECONDS)
+        self.assertEqual(loaded["ThrottleInterval"], 10)
+        self.assertEqual(loaded["EnvironmentVariables"][bd.WATCHER_ENV], "1")
+        self.assertEqual(loaded["StandardOutPath"], str(self.log))
         self.assertTrue(any(call.args[0][:2] == ["launchctl", "bootstrap"] for call in self.run.call_args_list))
 
     def test_dry_run_does_not_write_or_load(self):
@@ -308,6 +313,182 @@ class WatcherTests(unittest.TestCase):
         self.assertEqual(command[:3], ["schtasks", "/Create", "/F"])
         self.assertIn("--heal", command[-1])
         self.assertIn(str(self.config), command[-1])
+        self.assertNotIn("Full Disk Access", " ".join(command))
+
+    def test_denied_folder_still_installs_and_reports(self):
+        self.data.mkdir()
+        self.data.chmod(0)
+        self.addCleanup(self.data.chmod, 0o755)
+        with patch("betterdiscord.open_privacy_settings") as settings, self.assertLogs(
+            "betterdiscord", level="ERROR"
+        ) as logs:
+            installed = bd.install_watcher([self.data], self.asar, self.config, dry_run=False)
+        self.assertFalse(installed)
+        settings.assert_called_once()
+        self.assertTrue(self.plist.is_file())
+        self.assertIn(bd.PRIVACY_FULL_DISK_URL, "\n".join(logs.output))
+
+    def test_launchd_denial_is_reported_when_this_process_can_read(self):
+        self.data.mkdir()
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["launchctl", "kickstart"]:
+                self.log.write_text("macOS blocked reading Discord's data folder:\n/Users/user\n")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        self.run.side_effect = fake_run
+        with patch("betterdiscord.WATCHER_PROBE_SECONDS", 2), patch(
+            "betterdiscord.open_privacy_settings"
+        ) as settings:
+            installed = bd.install_watcher([self.data], self.asar, self.config, dry_run=False)
+        self.assertFalse(installed)
+        settings.assert_called_once()
+
+
+class AccessTests(unittest.TestCase):
+    def test_access_denied_recognizes_tcc_errors(self):
+        self.assertTrue(bd.is_access_denied(PermissionError(errno.EPERM, "Operation not permitted")))
+        self.assertTrue(bd.is_access_denied(PermissionError(errno.EACCES, "Permission denied")))
+        self.assertFalse(bd.is_access_denied(FileNotFoundError(errno.ENOENT, "No such file")))
+
+    def test_app_bundle_from_command(self):
+        self.assertEqual(
+            bd.app_bundle_from_command("/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal"),
+            "/Applications/Utilities/Terminal.app",
+        )
+        self.assertIsNone(bd.app_bundle_from_command("/opt/homebrew/bin/python3"))
+
+    def test_macos_message_names_the_binary_and_settings_panes(self):
+        with patch("betterdiscord.platform.system", return_value="Darwin"), patch(
+            "betterdiscord.access_targets",
+            return_value=["/opt/homebrew/bin/python3", "/System/Applications/Utilities/Terminal.app"],
+        ):
+            message = bd.access_denied_message(Path("/Users/user/Library/Application Support/discord"))
+        self.assertIn("/opt/homebrew/bin/python3", message)
+        self.assertIn("Terminal.app", message)
+        self.assertIn(bd.PRIVACY_FULL_DISK_URL, message)
+        self.assertIn(bd.PRIVACY_APP_DATA_URL, message)
+        self.assertIn("access data from other apps", message)
+        self.assertIn("Command-Shift-G", message)
+
+    def test_windows_message_does_not_send_the_user_to_macos_settings(self):
+        with patch("betterdiscord.platform.system", return_value="Windows"):
+            message = bd.access_denied_message(Path(r"C:\Users\x\AppData\Roaming\discord"))
+        self.assertNotIn("Full Disk Access", message)
+        self.assertNotIn(bd.PRIVACY_FULL_DISK_URL, message)
+        self.assertIn("denied access", message)
+
+    def test_doctor_explains_a_macos_privacy_block(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        data = root / "discord"
+        data.mkdir()
+        (data / "app-0.0.420").mkdir()
+        data.chmod(0)
+        self.addCleanup(data.chmod, 0o755)
+        asar = root / "betterdiscord.asar"
+        asar.write_bytes(archive(b"current"))
+        options = bd.Options(
+            "stable", data, asar, False, False, False, False,
+            False, "latest", False, False, 1, False,
+        )
+        with patch("betterdiscord.platform.system", return_value="Darwin"), patch(
+            "betterdiscord.open_privacy_settings"
+        ) as settings, self.assertLogs("betterdiscord", level="INFO") as logs:
+            self.assertFalse(bd.doctor(options))
+        settings.assert_called_once()
+        text = "\n".join(logs.output)
+        self.assertIn(bd.PRIVACY_FULL_DISK_URL, text)
+        self.assertIn("Grant the permission above", text)
+        self.assertNotIn("Core check failed", text)
+        self.assertIn(str(asar.stat().st_size), text)
+
+    def test_heal_notifies_and_does_not_open_settings_from_the_watcher(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        data = root / "discord"
+        data.mkdir()
+        data.chmod(0)
+        self.addCleanup(data.chmod, 0o755)
+        asar = root / "betterdiscord.asar"
+        asar.write_bytes(archive(b"current"))
+        options = bd.Options(
+            "stable", data, asar, False, False, False, False,
+            False, "latest", False, False, 1, False,
+        )
+        with patch("betterdiscord.platform.system", return_value="Darwin"), patch(
+            "betterdiscord.notify"
+        ) as notify, patch("betterdiscord.open_privacy_settings") as settings, patch.dict(
+            os.environ, {bd.WATCHER_ENV: "1"}
+        ):
+            self.assertFalse(bd.heal(options))
+        settings.assert_not_called()
+        self.assertIn("Full Disk Access", notify.call_args.args[1])
+
+    def test_manual_heal_opens_privacy_settings_when_blocked(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        data = root / "discord"
+        data.mkdir()
+        data.chmod(0)
+        self.addCleanup(data.chmod, 0o755)
+        asar = root / "betterdiscord.asar"
+        asar.write_bytes(archive(b"current"))
+        options = bd.Options(
+            "stable", data, asar, False, False, False, False,
+            False, "latest", False, False, 1, False,
+        )
+        with patch("betterdiscord.platform.system", return_value="Darwin"), patch(
+            "betterdiscord.notify"
+        ), patch("betterdiscord.open_privacy_settings") as settings:
+            self.assertFalse(bd.heal(options))
+        settings.assert_called_once()
+
+
+class LoaderWaitTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.data = self.root / "discord"
+        self.core = self.data / "app-0.0.414/modules/discord_desktop_core-2/discord_desktop_core"
+        self.core.mkdir(parents=True)
+        (self.core / "core.asar").write_bytes(b"core")
+        self.index = self.core / "index.js"
+        self.original = 'module.exports = require("./core.asar");\n'
+        self.index.write_text(self.original)
+        self.asar = self.root / "betterdiscord.asar"
+        self.asar.write_bytes(archive(b"current"))
+        self.options = bd.Options(
+            "stable", self.data, self.asar, False, True, True, True,
+            False, "latest", False, False, 1, False,
+        )
+        self.addCleanup(patch.stopall)
+        patch("betterdiscord.platform.system", return_value="Windows").start()
+        patch("betterdiscord.discord_update_dir", return_value=None).start()
+        patch("betterdiscord.log_discord_app_version").start()
+        patch("betterdiscord.discord_running", return_value=False).start()
+        patch("betterdiscord.quit_discord").start()
+        patch("betterdiscord.open_discord").start()
+        patch("betterdiscord.download_asar").start()
+        patch("betterdiscord.notify").start()
+
+    def test_watcher_waits_until_the_new_loader_file_exists(self):
+        newer = self.data / "app-0.0.420/modules/discord_desktop_core-1/discord_desktop_core"
+        newer.mkdir(parents=True)
+        (newer / "core.asar").write_bytes(b"core")
+
+        def finish(_seconds):
+            (newer / "index.js").write_text(self.original)
+
+        with patch.dict(os.environ, {bd.WATCHER_ENV: "1"}), patch(
+            "betterdiscord.time.sleep", side_effect=finish
+        ):
+            self.assertTrue(bd.heal(self.options))
+        self.assertEqual((newer / "index.js").read_text(encoding="utf-8"), bd.injection_source(self.asar))
 
 
 if __name__ == "__main__":
